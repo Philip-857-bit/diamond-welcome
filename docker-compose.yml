@@ -1,0 +1,10 @@
+services:
+  welcome-bot:
+    build: .
+    restart: always
+    env_file: .env
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
