@@ -8,6 +8,7 @@ import logging
 
 from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, MessageHandler, filters
+from telegram.request import HTTPXRequest
 
 from bot.config import BOT_TOKEN, setup_logging
 from bot.error_handler import error_handler
@@ -19,7 +20,21 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     setup_logging()
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    # 60s read/write timeout for file uploads
+    request = HTTPXRequest(
+        connect_timeout=10.0,
+        read_timeout=60.0,
+        write_timeout=60.0,
+        pool_timeout=10.0,
+    )
+
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .request(request)
+        .get_updates_request(HTTPXRequest(connect_timeout=10.0, read_timeout=30.0))
+        .build()
+    )
 
     # F1.1: Listen for new members joining
     application.add_handler(

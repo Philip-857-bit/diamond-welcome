@@ -109,13 +109,7 @@ async def new_member_handler(
                     logger.info("Cached GIF file_id: %s", msg.animation.file_id)
         except Exception as exc:
             logger.error("Failed to send welcome GIF to %s: %s", chat_id, exc)
-            # Unmute so the user isn't stuck muted with no CAPTCHA
-            try:
-                await context.bot.restrict_chat_member(
-                    chat_id, user_id, permissions=FULL_PERMISSIONS
-                )
-            except (BadRequest, Forbidden):
-                pass
+            # Keep user muted — 5-min kick will clean up if CAPTCHA wasn't sent
             continue
 
         # Pin the CAPTCHA so it doesn't get lost in busy groups
