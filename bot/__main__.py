@@ -58,6 +58,7 @@ def build_application() -> Application:
     app = (
         Application.builder()
         .token(BOT_TOKEN)
+        .updater(None)
         .request(request_config)
         .get_updates_request(HTTPXRequest(connect_timeout=10.0, read_timeout=30.0))
         .build()
@@ -75,26 +76,6 @@ def build_application() -> Application:
 
 
 application = build_application()
-
-
-async def post_init(app: Application) -> None:
-    webhook_url = f"{RENDER_EXTERNAL_URL}/{WEBHOOK_PATH}"
-    logger.info("Setting webhook: %s", webhook_url)
-    await app.bot.set_webhook(
-        url=webhook_url,
-        secret_token=WEBHOOK_SECRET,
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
-    )
-
-
-async def post_shutdown(app: Application) -> None:
-    logger.info("Dropping webhook...")
-    await app.bot.delete_webhook(drop_pending_updates=True)
-
-
-application.post_init = post_init
-application.post_shutdown = post_shutdown
 
 
 def main() -> None:
@@ -115,12 +96,27 @@ def main() -> None:
     )
     server = uvicorn.Server(config)
 
+    async def _serve() -> None:
+        await server.serve()
+
     async def run() -> None:
+        webhook_url = f"{RENDER_EXTERNAL_URL}/{WEBHOOK_PATH}"
+        logger.info("Setting webhook: %s", webhook_url)
+        await application.bot.set_webhook(
+            url=webhook_url,
+            secret_token=WEBHOOK_SECRET,
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+        )
+
         async with application:
             await application.start()
             logger.info("Bot started — listening on port %s", PORT)
-            await server.serve()
+            await _serve()
             await application.stop()
+
+        logger.info("Dropping webhook...")
+        await application.bot.delete_webhook(drop_pending_updates=True)
 
     asyncio.run(run())
 
