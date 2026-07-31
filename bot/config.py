@@ -15,6 +15,13 @@ load_dotenv()
 
 BOT_TOKEN: str = os.environ["BOT_TOKEN"]
 
+# ─── Webhook (Render) ────────────────────────────────────────────────────────
+
+PORT: int = int(os.getenv("PORT", "8080"))
+RENDER_EXTERNAL_URL: str = os.environ["RENDER_EXTERNAL_URL"]
+WEBHOOK_PATH: str = os.getenv("WEBHOOK_PATH", "webhook")
+WEBHOOK_SECRET: str = os.environ["WEBHOOK_SECRET"]
+
 # Local welcome animation sent on first join; file_id is cached afterwards.
 WELCOME_GIF_PATH: str = os.path.join(os.path.dirname(__file__), "..", "welcome.mp4")
 

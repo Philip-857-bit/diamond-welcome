@@ -1,2 +1,4 @@
-python-telegram-bot[job-queue]==21.9
 python-dotenv==1.1.0
+python-telegram-bot[job-queue]==21.9
+starlette~=0.20.0
+uvicorn~=0.23.2

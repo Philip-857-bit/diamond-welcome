@@ -1,56 +1,128 @@
 """
 Entry point — ``python -m bot``.
 
-Builds the Application, registers all handlers, and starts polling.
+Builds the Application, registers all handlers, and runs a Starlette webhook
+server (uvicorn) so Render sees inbound HTTP traffic and keeps the container alive.
 """
 
+import asyncio
 import logging
+from http import HTTPStatus
+
+import uvicorn
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse, Response
+from starlette.routing import Route
 
 from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
-from bot.config import BOT_TOKEN, setup_logging
+from bot.config import (
+    BOT_TOKEN,
+    PORT,
+    RENDER_EXTERNAL_URL,
+    WEBHOOK_PATH,
+    WEBHOOK_SECRET,
+    setup_logging,
+)
 from bot.error_handler import error_handler
 from bot.handlers import button_handler, new_member_handler
 
 logger = logging.getLogger(__name__)
 
 
-def main() -> None:
-    setup_logging()
+async def health(_: Request) -> PlainTextResponse:
+    return PlainTextResponse("ok", status_code=HTTPStatus.OK)
 
-    # 60s read/write timeout for file uploads
-    request = HTTPXRequest(
+
+async def webhook(request: Request) -> Response:
+    header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if header_secret != WEBHOOK_SECRET:
+        return Response(status_code=HTTPStatus.FORBIDDEN)
+
+    update = Update.de_json(data=await request.json(), bot=application.bot)
+    await application.update_queue.put(update)
+    return Response()
+
+
+def build_application() -> Application:
+    request_config = HTTPXRequest(
         connect_timeout=10.0,
         read_timeout=60.0,
         write_timeout=60.0,
         pool_timeout=10.0,
     )
 
-    application = (
+    app = (
         Application.builder()
         .token(BOT_TOKEN)
-        .request(request)
+        .request(request_config)
         .get_updates_request(HTTPXRequest(connect_timeout=10.0, read_timeout=30.0))
         .build()
     )
 
-    # F1.1: Listen for new members joining
-    application.add_handler(
+    app.add_handler(
         MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_handler)
     )
-
-    # F3: Handle CAPTCHA button presses (only "verify:…" callbacks)
-    application.add_handler(
+    app.add_handler(
         CallbackQueryHandler(button_handler, pattern=r"^verify:")
     )
+    app.add_error_handler(error_handler)
 
-    # Global error handler (RetryAfter, etc.)
-    application.add_error_handler(error_handler)
+    return app
 
-    logger.info("Bot starting...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+application = build_application()
+
+
+async def post_init(app: Application) -> None:
+    webhook_url = f"{RENDER_EXTERNAL_URL}/{WEBHOOK_PATH}"
+    logger.info("Setting webhook: %s", webhook_url)
+    await app.bot.set_webhook(
+        url=webhook_url,
+        secret_token=WEBHOOK_SECRET,
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+    )
+
+
+async def post_shutdown(app: Application) -> None:
+    logger.info("Dropping webhook...")
+    await app.bot.delete_webhook(drop_pending_updates=True)
+
+
+application.post_init = post_init
+application.post_shutdown = post_shutdown
+
+
+def main() -> None:
+    setup_logging()
+
+    starlette_app = Starlette(
+        routes=[
+            Route("/", health, methods=["GET"]),
+            Route(f"/{WEBHOOK_PATH}", webhook, methods=["POST"]),
+        ]
+    )
+
+    config = uvicorn.Config(
+        app=starlette_app,
+        host="0.0.0.0",
+        port=PORT,
+        log_level="info",
+    )
+    server = uvicorn.Server(config)
+
+    async def run() -> None:
+        async with application:
+            await application.start()
+            logger.info("Bot started — listening on port %s", PORT)
+            await server.serve()
+            await application.stop()
+
+    asyncio.run(run())
 
 
 if __name__ == "__main__":
