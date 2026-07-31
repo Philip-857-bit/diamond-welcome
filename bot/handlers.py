@@ -107,12 +107,6 @@ async def new_member_handler(
                 if msg.animation:
                     set_gif_file_id(msg.animation.file_id)
                     logger.info("Cached GIF file_id: %s", msg.animation.file_id)
-
-        # Pin the CAPTCHA so it doesn't get lost in busy groups
-        try:
-            await context.bot.pin_chat_message(chat_id, msg.message_id)
-        except (BadRequest, Forbidden) as exc:
-            logger.warning("Failed to pin CAPTCHA message: %s", exc)
         except Exception as exc:
             logger.error("Failed to send welcome GIF to %s: %s", chat_id, exc)
             # Unmute so the user isn't stuck muted with no CAPTCHA
@@ -123,6 +117,12 @@ async def new_member_handler(
             except (BadRequest, Forbidden):
                 pass
             continue
+
+        # Pin the CAPTCHA so it doesn't get lost in busy groups
+        try:
+            await context.bot.pin_chat_message(chat_id, msg.message_id)
+        except (BadRequest, Forbidden) as exc:
+            logger.warning("Failed to pin CAPTCHA message: %s", exc)
 
         # Store pending state
         pending_users.set(
