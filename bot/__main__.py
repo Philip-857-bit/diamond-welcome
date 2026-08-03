@@ -31,13 +31,11 @@ from bot.config import (
     EVENT_CLEANUP_SECONDS,
     EVENT_RETENTION_DAYS,
     HELIUS_API_KEY,
-    HELIUS_MAX_MONITORED_ADDRESSES,
     HELIUS_MAX_PAYLOAD_BYTES,
     HELIUS_WEBHOOK_PATH,
     HELIUS_WEBHOOK_SECRET,
     PORT,
     RENDER_EXTERNAL_URL,
-    TOKEN_ACCOUNT_REFRESH_SECONDS,
     WEBHOOK_PATH,
     WEBHOOK_SECRET,
     setup_logging,
@@ -47,7 +45,7 @@ from bot.commands import CommandRegistry, register_command_handlers
 from bot.database import Database
 from bot.error_handler import error_handler
 from bot.handlers import button_handler, new_member_handler
-from bot.solana import HeliusClient, TokenAccountRefresher, WatchlistService
+from bot.solana import HeliusClient, WatchlistService
 
 logger = logging.getLogger(__name__)
 HELIUS_ACK_TIMEOUT_SECONDS = 0.8
@@ -105,11 +103,6 @@ async def helius_webhook(request: Request) -> Response:
             if database is None:
                 return Response(status_code=HTTPStatus.SERVICE_UNAVAILABLE)
             await database.enqueue_events(events)
-            refresher: TokenAccountRefresher | None = application.bot_data.get(
-                "token_account_refresher"
-            )
-            if refresher is not None:
-                refresher.observe(events)
     except TimeoutError:
         logger.warning("Helius webhook persistence exceeded acknowledgement deadline")
         return Response(status_code=HTTPStatus.SERVICE_UNAVAILABLE)
@@ -181,12 +174,9 @@ def main() -> None:
             HELIUS_WEBHOOK_SECRET,
             RENDER_EXTERNAL_URL,
             HELIUS_WEBHOOK_PATH,
-            HELIUS_MAX_MONITORED_ADDRESSES,
         )
         worker: AlertWorker | None = None
         worker_task: asyncio.Task[None] | None = None
-        refresher: TokenAccountRefresher | None = None
-        refresher_task: asyncio.Task[None] | None = None
         try:
             await database.connect()
             if (
@@ -227,28 +217,16 @@ def main() -> None:
                         retention_days=EVENT_RETENTION_DAYS,
                         dead_retention_days=DEAD_EVENT_RETENTION_DAYS,
                     )
-                    refresher = TokenAccountRefresher(
-                        watchlist, TOKEN_ACCOUNT_REFRESH_SECONDS
-                    )
-                    application.bot_data["token_account_refresher"] = refresher
                     worker_task = asyncio.create_task(
                         worker.run(), name="solducks-alert-worker"
-                    )
-                    refresher_task = asyncio.create_task(
-                        refresher.run(), name="solducks-token-account-refresher"
                     )
                     logger.info("SolDucks started — listening on port %s", PORT)
                     await _serve()
                 finally:
                     if worker:
                         worker.stop()
-                    if refresher:
-                        refresher.stop()
-                    application.bot_data.pop("token_account_refresher", None)
                     if worker_task:
                         await asyncio.gather(worker_task, return_exceptions=True)
-                    if refresher_task:
-                        await asyncio.gather(refresher_task, return_exceptions=True)
                     if application.running:
                         await application.stop()
         finally:
@@ -257,11 +235,6 @@ def main() -> None:
                     worker.stop()
                 worker_task.cancel()
                 await asyncio.gather(worker_task, return_exceptions=True)
-            if refresher_task and not refresher_task.done():
-                if refresher:
-                    refresher.stop()
-                refresher_task.cancel()
-                await asyncio.gather(refresher_task, return_exceptions=True)
             await helius.close()
             await database.close()
 

@@ -399,26 +399,6 @@ class HeliusWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.database.events, events)
 
-    async def test_notifies_token_account_refresher(self) -> None:
-        class Refresher:
-            def __init__(self):
-                self.events = None
-
-            def observe(self, events):
-                self.events = events
-
-        refresher = Refresher()
-        entrypoint.application.bot_data["token_account_refresher"] = refresher
-        events = [{"signature": "coverage", "type": "CREATE_ACCOUNT"}]
-        response = await self.client.post(
-            "/helius/webhook",
-            json=events,
-            headers={"Authorization": "Bearer-helius-test-secret"},
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(refresher.events, events)
-        entrypoint.application.bot_data.pop("token_account_refresher", None)
-
     async def test_rejects_non_json_content(self) -> None:
         response = await self.client.post(
             "/helius/webhook",

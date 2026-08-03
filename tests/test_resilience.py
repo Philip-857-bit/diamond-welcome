@@ -14,9 +14,7 @@ from bot.solana import (
     BuyAlert,
     HeliusClient,
     HeliusError,
-    TokenAccountRefresher,
     WatchlistService,
-    extract_token_accounts,
 )
 
 
@@ -27,16 +25,10 @@ ATA_TWO = "9xQeWvG816bUx9EPfEZKj4qNQwTPVDGMuQeN9pL9dS7p"
 
 class SyncDatabase:
     def __init__(self) -> None:
-        self.settings = {
-            "helius_webhook_id": "webhook-id",
-            "helius_coverage_webhook_id": "coverage-webhook-id",
-        }
+        self.settings = {"helius_webhook_id": "webhook-id"}
 
     async def list_tokens(self):
         return [WatchedToken(MINT, "Wrapped SOL", "SOL", 9, 1)]
-
-    async def list_monitored_addresses(self):
-        return [MINT, ATA_ONE]
 
     async def get_setting(self, key):
         return self.settings.get(key)
@@ -48,117 +40,6 @@ class SyncDatabase:
 class HeliusCoverageTests(unittest.IsolatedAsyncioTestCase):
     def test_schema_accepts_full_spl_decimal_range(self) -> None:
         self.assertIn("decimals BETWEEN 0 AND 255", SCHEMA)
-
-    def test_extracts_token_accounts_from_enhanced_events(self) -> None:
-        observed = extract_token_accounts(
-            [
-                {
-                    "accountData": [
-                        {
-                            "tokenBalanceChanges": [
-                                {"mint": MINT, "tokenAccount": ATA_ONE}
-                            ]
-                        }
-                    ],
-                    "tokenTransfers": [
-                        {
-                            "mint": MINT,
-                            "fromTokenAccount": ATA_ONE,
-                            "toTokenAccount": ATA_TWO,
-                        }
-                    ],
-                }
-            ]
-        )
-        self.assertEqual(observed, {MINT: {ATA_ONE, ATA_TWO}})
-
-    async def test_discovers_token_accounts_via_das(self) -> None:
-        calls: list[dict] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            payload = json.loads(request.content)
-            calls.append(payload)
-            cursor = payload["params"].get("cursor")
-            if cursor is None:
-                result = {
-                    "token_accounts": [{"address": ATA_ONE}],
-                    "cursor": "page-2",
-                }
-            elif cursor == "page-2":
-                result = {
-                    "token_accounts": [{"address": ATA_TWO}],
-                    "cursor": None,
-                }
-            else:
-                result = {"token_accounts": [], "cursor": None}
-            return httpx.Response(200, json={"jsonrpc": "2.0", "result": result})
-
-        client = HeliusClient("key", "secret", "https://app.test", "helius")
-        await client.http.aclose()
-        client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        try:
-            addresses = await client.discover_token_accounts(MINT)
-        finally:
-            await client.close()
-        self.assertEqual(addresses, {ATA_ONE, ATA_TWO})
-        self.assertEqual(len(calls), 2)
-        self.assertTrue(all(call["method"] == "getTokenAccounts" for call in calls))
-        self.assertEqual(calls[0]["params"]["mint"], MINT)
-        self.assertNotIn("cursor", calls[0]["params"])
-        self.assertEqual(calls[1]["params"]["cursor"], "page-2")
-        self.assertEqual(calls[0]["params"]["limit"], 100)
-
-    async def test_rejects_repeated_das_pagination_cursor(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={
-                    "jsonrpc": "2.0",
-                    "result": {"token_accounts": [], "cursor": ATA_ONE},
-                },
-            )
-
-        client = HeliusClient("key", "secret", "https://app.test", "helius")
-        await client.http.aclose()
-        client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        try:
-            with self.assertRaisesRegex(HeliusError, "pagination cursor"):
-                await client.discover_token_accounts(MINT)
-        finally:
-            await client.close()
-
-    async def test_logs_sanitized_token_discovery_rpc_error(self) -> None:
-        api_key = "super-secret-helius-key"
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={
-                    "jsonrpc": "2.0",
-                    "error": {
-                        "code": -32010,
-                        "message": (
-                            f"Token account index unavailable\napi-key={api_key}"
-                        ),
-                    },
-                },
-            )
-
-        client = HeliusClient(api_key, "secret", "https://app.test", "helius")
-        await client.http.aclose()
-        client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        try:
-            with self.assertLogs("bot.solana", logging.WARNING) as captured:
-                with self.assertRaisesRegex(HeliusError, "rejected"):
-                    await client.discover_token_accounts(MINT)
-        finally:
-            await client.close()
-
-        logged = " ".join(captured.output)
-        self.assertIn("code=-32010", logged)
-        self.assertIn("Token account index unavailable", logged)
-        self.assertNotIn(api_key, logged)
-        self.assertNotIn("\n", logged)
 
     async def test_rejects_unparsed_account_data_without_crashing(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -245,14 +126,13 @@ class HeliusCoverageTests(unittest.IsolatedAsyncioTestCase):
 
         def handler(request: httpx.Request) -> httpx.Response:
             methods.append(request.method)
-            coverage = request.url.path.endswith("coverage-webhook-id")
             return httpx.Response(
                 200,
                 json={
-                    "webhookID": "coverage-webhook-id" if coverage else "webhook-id",
+                    "webhookID": "webhook-id",
                     "webhookURL": "https://app.test/helius",
-                    "transactionTypes": ["ANY"] if coverage else ["BUY", "SWAP"],
-                    "accountAddresses": [MINT] if coverage else [ATA_ONE, MINT],
+                    "transactionTypes": ["BUY", "SWAP"],
+                    "accountAddresses": [MINT],
                     "authHeader": "secret",
                     "active": True,
                 },
@@ -265,7 +145,7 @@ class HeliusCoverageTests(unittest.IsolatedAsyncioTestCase):
             await client.sync_webhook(SyncDatabase())
         finally:
             await client.close()
-        self.assertEqual(methods, ["GET", "GET"])
+        self.assertEqual(methods, ["GET"])
 
     async def test_add_reconciles_remote_after_local_rollback(self) -> None:
         token = WatchedToken(MINT, "Wrapped SOL", "SOL", 9, 1)
@@ -273,7 +153,6 @@ class HeliusCoverageTests(unittest.IsolatedAsyncioTestCase):
         class RollbackDatabase:
             def __init__(self):
                 self.token = None
-                self.accounts = set()
 
             async def get_token(self, mint):
                 return self.token if self.token and self.token.mint == mint else None
@@ -281,38 +160,25 @@ class HeliusCoverageTests(unittest.IsolatedAsyncioTestCase):
             async def list_tokens(self):
                 return [self.token] if self.token else []
 
-            async def list_monitored_addresses(self):
-                return ([MINT] + sorted(self.accounts)) if self.token else []
-
             async def add_token(self, value):
                 self.token = value
                 return True
 
             async def remove_token(self, mint):
                 removed, self.token = self.token, None
-                self.accounts = set()
                 return removed
 
-            async def replace_token_accounts(self, mint, addresses):
-                self.accounts = set(addresses)
-                return True
-
         class PartiallyFailingHelius:
-            max_monitored_addresses = 100_000
-
             def __init__(self):
                 self.sync_states = []
 
             async def validate_mint(self, mint, added_by):
                 return token
 
-            async def discover_token_accounts(self, mint):
-                return {ATA_ONE}
-
             async def sync_webhook(self, database):
-                self.sync_states.append(await database.list_monitored_addresses())
+                self.sync_states.append([t.mint for t in await database.list_tokens()])
                 if len(self.sync_states) == 1:
-                    raise HeliusError("second webhook update failed")
+                    raise HeliusError("webhook update failed")
 
         database = RollbackDatabase()
         helius = PartiallyFailingHelius()
@@ -321,7 +187,7 @@ class HeliusCoverageTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HeliusError):
             await watchlist.add(MINT, 1)
 
-        self.assertEqual(helius.sync_states, [[MINT, ATA_ONE], []])
+        self.assertEqual(helius.sync_states, [[MINT], []])
         self.assertIsNone(database.token)
 
 
@@ -378,88 +244,6 @@ class EventLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await database.claim_event())
         self.assertIn("status = 'processing'", queries[0])
         self.assertIn("updated_at <=", queries[0])
-
-
-class ObservingWatchlist:
-    def __init__(self) -> None:
-        self.observed = []
-        self.refreshes = 0
-
-    async def add_observed_accounts(self, accounts):
-        self.observed.append(accounts)
-
-    async def refresh_all(self):
-        self.refreshes += 1
-
-
-class TokenAccountRefresherTests(unittest.IsolatedAsyncioTestCase):
-    def test_observe_queues_raw_events_without_parsing_them(self) -> None:
-        refresher = TokenAccountRefresher(ObservingWatchlist(), 3600)
-        events = [{"tokenTransfers": [{"mint": MINT}]}]
-        with patch("bot.solana.extract_token_accounts") as extract:
-            refresher.observe(events)
-        extract.assert_not_called()
-
-    async def test_observed_accounts_wake_refresher_immediately(self) -> None:
-        watchlist = ObservingWatchlist()
-        refresher = TokenAccountRefresher(watchlist, 3600)
-        task = asyncio.create_task(refresher.run())
-        refresher.observe(
-            [
-                {
-                    "type": "SWAP",
-                    "tokenTransfers": [
-                        {
-                            "mint": MINT,
-                            "fromTokenAccount": ATA_ONE,
-                            "toTokenAccount": ATA_TWO,
-                        }
-                    ],
-                }
-            ]
-        )
-        await asyncio.sleep(0.01)
-        refresher.stop()
-        await task
-        self.assertIn({MINT: {ATA_ONE, ATA_TWO}}, watchlist.observed)
-
-    async def test_failed_observations_are_merged_into_next_attempt(self) -> None:
-        class FailsOnceWatchlist:
-            def __init__(self):
-                self.calls = []
-                self.first_started = asyncio.Event()
-                self.release_first = asyncio.Event()
-                self.second_completed = asyncio.Event()
-
-            async def add_observed_accounts(self, accounts):
-                self.calls.append(accounts)
-                if len(self.calls) == 1:
-                    self.first_started.set()
-                    await self.release_first.wait()
-                    raise RuntimeError("temporary Helius failure")
-                self.second_completed.set()
-
-            async def refresh_all(self):
-                return None
-
-        watchlist = FailsOnceWatchlist()
-        refresher = TokenAccountRefresher(watchlist, 3600)
-        refresher.observe(
-            [{"tokenTransfers": [{"mint": MINT, "fromTokenAccount": ATA_ONE}]}]
-        )
-        task = asyncio.create_task(refresher.run())
-        await watchlist.first_started.wait()
-        refresher.observe(
-            [{"tokenTransfers": [{"mint": ATA_ONE, "fromTokenAccount": ATA_TWO}]}]
-        )
-        watchlist.release_first.set()
-        await asyncio.wait_for(watchlist.second_completed.wait(), timeout=1)
-        refresher.stop()
-        await task
-        self.assertEqual(
-            watchlist.calls[1],
-            {MINT: {ATA_ONE}, ATA_ONE: {ATA_TWO}},
-        )
 
 
 class WorkerDatabase:

@@ -265,19 +265,16 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     database, _, _ = _services(context)
     tokens = await database.list_tokens()
-    monitored_addresses = await database.list_monitored_addresses()
     alert_chat = await database.get_setting("alert_chat_id")
     webhook_id = await database.get_setting("helius_webhook_id")
-    coverage_webhook_id = await database.get_setting("helius_coverage_webhook_id")
     counts = await database.event_counts()
     uncertain = await database.uncertain_delivery_count()
     await update.effective_message.reply_text(
         "SolDucks status\n"
         f"Watched mints: {len(tokens)}\n"
-        f"Monitored mint/token accounts: {len(monitored_addresses)}\n"
         f"Alert chat: {alert_chat or 'not configured'}\n"
-        "Helius webhooks: "
-        f"{'configured' if webhook_id and coverage_webhook_id else 'not fully configured'}\n"
+        "Helius webhook: "
+        f"{'configured' if webhook_id else 'not configured'}\n"
         f"Delivered events: {counts.get('delivered', 0)}\n"
         f"Pending/retrying: {counts.get('pending', 0) + counts.get('failed', 0)}\n"
         f"Dead-letter events: {counts.get('dead', 0)}\n"

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -24,7 +23,6 @@ USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 QUOTE_MINTS = {WSOL_MINT: "SOL", USDC_MINT: "USDC", USDT_MINT: "USDT"}
 BASE58_ALPHABET = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
-MAX_PENDING_EVENT_BATCHES = 20
 
 
 class HeliusError(RuntimeError):
@@ -63,12 +61,10 @@ class HeliusClient:
         webhook_secret: str,
         public_base_url: str,
         webhook_path: str,
-        max_monitored_addresses: int = 100_000,
     ) -> None:
         self.api_key = api_key
         self.webhook_secret = webhook_secret
         self.webhook_url = f"{public_base_url.rstrip('/')}/{webhook_path.strip('/')}"
-        self.max_monitored_addresses = max_monitored_addresses
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0))
 
     async def close(self) -> None:
@@ -240,78 +236,13 @@ class HeliusClient:
         except (KeyError, TypeError, ValueError) as exc:
             raise HeliusError("Solana returned invalid mint decimals.") from exc
 
-    async def discover_token_accounts(self, mint: str) -> set[str]:
-        """Find token accounts for a mint via Helius DAS getTokenAccounts."""
-        rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
-        discovered: set[str] = set()
-        cursor: str | None = None
-        seen_cursors: set[str] = set()
-        while True:
-            params: dict[str, Any] = {"mint": mint, "limit": 100}
-            if cursor is not None:
-                params["cursor"] = cursor
-            payload = await self._rpc_post_with_retry(
-                rpc_url,
-                {
-                    "jsonrpc": "2.0",
-                    "id": "solducks-token-accounts",
-                    "method": "getTokenAccounts",
-                    "params": params,
-                },
-            )
-            if not isinstance(payload, dict):
-                raise HeliusError("Helius returned invalid token-account data.")
-            if payload.get("error"):
-                code, message = self._safe_rpc_error(payload["error"])
-                logger.warning("DAS rejected token-account discovery (code=%s): %s", code, message)
-                raise HeliusError("Helius rejected the token-account discovery request.")
-            result = payload.get("result")
-            if not isinstance(result, dict):
-                raise HeliusError("Helius returned invalid token-account data.")
-            accounts = result.get("token_accounts")
-            if not isinstance(accounts, list):
-                raise HeliusError("Helius returned invalid token-account data.")
-            for item in accounts:
-                address = item.get("address") if isinstance(item, dict) else None
-                if isinstance(address, str) and is_public_key(address):
-                    discovered.add(address)
-            if len(discovered) > self.max_monitored_addresses:
-                raise HeliusError(
-                    "This token has more token accounts than the configured "
-                    "Helius webhook address limit."
-                )
-            cursor = result.get("cursor")
-            if not cursor:
-                break
-            if not isinstance(cursor, str):
-                raise HeliusError("Helius returned invalid pagination data.")
-            if cursor in seen_cursors:
-                raise HeliusError("Helius returned a repeated token-account pagination cursor.")
-            seen_cursors.add(cursor)
-        return discovered
-
     async def sync_webhook(self, database: Database) -> str | None:
-        addresses = await database.list_monitored_addresses()
         mints = [token.mint for token in await database.list_tokens()]
-        if len(addresses) > self.max_monitored_addresses:
-            raise HeliusError(
-                f"The watchlist requires {len(addresses):,} monitored addresses; "
-                f"Helius allows {self.max_monitored_addresses:,}."
-            )
-
-        # The coverage webhook sees mint-referencing account creation activity,
-        # while the alert webhook remains limited to actionable transactions.
-        await self._sync_one_webhook(
-            database,
-            setting_key="helius_coverage_webhook_id",
-            transaction_types={"ANY"},
-            addresses=mints,
-        )
         return await self._sync_one_webhook(
             database,
             setting_key="helius_webhook_id",
             transaction_types={"SWAP", "BUY"},
-            addresses=addresses,
+            addresses=mints,
         )
 
     async def _sync_one_webhook(
@@ -415,10 +346,9 @@ class HeliusClient:
             except ValueError:
                 if response.text:
                     detail = f": {response.text[:200]}"
-            address_count = len(body.get("accountAddresses", [])) if body else 0
             logger.warning(
-                "Helius webhook %s %s failed (HTTP %s, %d addresses)%s",
-                method, url, response.status_code, address_count, detail,
+                "Helius webhook %s %s failed (HTTP %s)%s",
+                method, url, response.status_code, detail,
             )
             raise HeliusError(
                 f"Helius rejected the webhook update (HTTP {response.status_code})"
@@ -443,14 +373,6 @@ class WatchlistService:
             if existing:
                 return existing, False
             token = await self.helius.validate_mint(mint, user_id)
-            token_accounts = await self.helius.discover_token_accounts(mint)
-            current_addresses = set(await self.database.list_monitored_addresses())
-            required = current_addresses | token_accounts | {mint}
-            if len(required) > self.helius.max_monitored_addresses:
-                raise ValueError(
-                    f"Adding this token would require {len(required):,} monitored addresses; "
-                    f"the Helius limit is {self.helius.max_monitored_addresses:,}."
-                )
             created = await self.database.add_token(token)
             if not created:
                 concurrent = await self.database.get_token(mint)
@@ -460,7 +382,6 @@ class WatchlistService:
                     "The watchlist changed concurrently; please try again."
                 )
             try:
-                await self.database.replace_token_accounts(mint, token_accounts)
                 await self.helius.sync_webhook(self.database)
             except Exception:
                 try:
@@ -472,7 +393,6 @@ class WatchlistService:
 
     async def remove(self, mint: str) -> WatchedToken | None:
         async with self._lock:
-            token_accounts = await self.database.get_token_accounts(mint)
             token = await self.database.remove_token(mint)
             if token is None:
                 return None
@@ -481,198 +401,17 @@ class WatchlistService:
             except Exception:
                 try:
                     await self.database.add_token(token)
-                    await self.database.replace_token_accounts(mint, token_accounts)
                 finally:
                     await self._reconcile_after_rollback()
                 raise
             return token
 
-    async def refresh_all(self) -> bool:
-        """Refresh token-account coverage and reconcile Helius once per batch."""
-        async with self._lock:
-            tokens = await self.database.list_tokens()
-            discoveries: dict[str, set[str]] = {}
-            all_addresses = {token.mint for token in tokens}
-            for token in tokens:
-                accounts = await self.helius.discover_token_accounts(token.mint)
-                discoveries[token.mint] = accounts
-                all_addresses.update(accounts)
-            if len(all_addresses) > self.helius.max_monitored_addresses:
-                raise HeliusError(
-                    f"Token-account refresh found {len(all_addresses):,} addresses; "
-                    f"the Helius limit is {self.helius.max_monitored_addresses:,}."
-                )
-            changed = False
-            for mint, accounts in discoveries.items():
-                changed = (
-                    await self.database.replace_token_accounts(mint, accounts)
-                    or changed
-                )
-            await self.helius.sync_webhook(self.database)
-            return changed
-
-    async def add_observed_accounts(self, observed: dict[str, set[str]]) -> bool:
-        """Merge token accounts learned directly from enhanced webhook events."""
-        async with self._lock:
-            watched = {token.mint for token in await self.database.list_tokens()}
-            relevant = {
-                mint: addresses
-                for mint, addresses in observed.items()
-                if mint in watched and addresses
-            }
-            if not relevant:
-                return False
-
-            previous: dict[str, set[str]] = {}
-            additions: set[str] = set()
-            for mint, addresses in relevant.items():
-                current = await self.database.get_token_accounts(mint)
-                previous[mint] = current
-                additions.update(addresses - current)
-            if not additions:
-                return False
-            current_addresses = set(await self.database.list_monitored_addresses())
-            if len(current_addresses | additions) > self.helius.max_monitored_addresses:
-                raise HeliusError(
-                    "Observed token accounts exceed the configured Helius address limit."
-                )
-
-            changed_mints: list[str] = []
-            try:
-                for mint, addresses in relevant.items():
-                    if await self.database.replace_token_accounts(
-                        mint, previous[mint] | addresses
-                    ):
-                        changed_mints.append(mint)
-                await self.helius.sync_webhook(self.database)
-            except Exception:
-                try:
-                    for mint in changed_mints:
-                        await self.database.replace_token_accounts(mint, previous[mint])
-                finally:
-                    await self._reconcile_after_rollback()
-                raise
-            return bool(changed_mints)
-
     async def _reconcile_after_rollback(self) -> None:
-        """Best-effort repair after a multi-webhook update partially succeeds."""
+        """Best-effort repair after a webhook update partially succeeds."""
         try:
             await self.helius.sync_webhook(self.database)
         except Exception:
-            # PostgreSQL remains the source of truth. The periodic refresher
-            # will retry reconciliation if Helius is still unavailable.
             logger.exception("Could not reconcile Helius after watchlist rollback")
-
-
-def extract_token_accounts(events: list[dict[str, Any]]) -> dict[str, set[str]]:
-    """Extract mint-to-token-account relationships from enhanced events."""
-    observed: dict[str, set[str]] = {}
-    for event in events:
-        transfers = event.get("tokenTransfers")
-        if isinstance(transfers, list):
-            for transfer in transfers:
-                if not isinstance(transfer, dict):
-                    continue
-                mint = transfer.get("mint")
-                if not isinstance(mint, str) or not is_public_key(mint):
-                    continue
-                for key in ("fromTokenAccount", "toTokenAccount"):
-                    address = transfer.get(key)
-                    if isinstance(address, str) and is_public_key(address):
-                        observed.setdefault(mint, set()).add(address)
-
-        account_data = event.get("accountData")
-        if not isinstance(account_data, list):
-            continue
-        for account in account_data:
-            changes = (
-                account.get("tokenBalanceChanges")
-                if isinstance(account, dict)
-                else None
-            )
-            if not isinstance(changes, list):
-                continue
-            for change in changes:
-                if not isinstance(change, dict):
-                    continue
-                mint = change.get("mint")
-                address = change.get("tokenAccount")
-                if (
-                    isinstance(mint, str)
-                    and isinstance(address, str)
-                    and is_public_key(mint)
-                    and is_public_key(address)
-                ):
-                    observed.setdefault(mint, set()).add(address)
-    return observed
-
-
-class TokenAccountRefresher:
-    def __init__(self, watchlist: WatchlistService, interval_seconds: float) -> None:
-        self.watchlist = watchlist
-        self.interval_seconds = interval_seconds
-        self._stop = asyncio.Event()
-        self._wake = asyncio.Event()
-        self._event_batches: deque[list[dict[str, Any]]] = deque()
-        self._observed: dict[str, set[str]] = {}
-        self._full_refresh_requested = False
-
-    def stop(self) -> None:
-        self._stop.set()
-        self._wake.set()
-
-    def observe(self, events: list[dict[str, Any]]) -> None:
-        """Queue raw events in O(1); extraction happens in the background loop."""
-        if len(self._event_batches) < MAX_PENDING_EVENT_BATCHES:
-            self._event_batches.append(events)
-        else:
-            # Bound memory during bursts. Full discovery safely recovers any
-            # token-account observations omitted from the in-memory queue.
-            self._full_refresh_requested = True
-        self._wake.set()
-
-    async def run(self) -> None:
-        first_run = True
-        while not self._stop.is_set():
-            failed = False
-            try:
-                batches, self._event_batches = self._event_batches, deque()
-                observed, self._observed = self._observed, {}
-                full_refresh = first_run or self._full_refresh_requested
-                first_run = False
-                self._full_refresh_requested = False
-                self._wake.clear()
-                for events in batches:
-                    extracted = extract_token_accounts(events)
-                    for mint, addresses in extracted.items():
-                        observed.setdefault(mint, set()).update(addresses)
-                    # Account initialization can contain no balance change. An
-                    # event with no extractable account requests full discovery.
-                    if not extracted:
-                        full_refresh = True
-                if observed:
-                    await self.watchlist.add_observed_accounts(observed)
-                if full_refresh:
-                    await self.watchlist.refresh_all()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                failed = True
-                for mint, addresses in observed.items():
-                    self._observed.setdefault(mint, set()).update(addresses)
-                self._full_refresh_requested = (
-                    self._full_refresh_requested or full_refresh
-                )
-                logger.exception("Token-account coverage refresh failed")
-            delay = (
-                min(60.0, self.interval_seconds) if failed else self.interval_seconds
-            )
-            if self._stop.is_set():
-                break
-            try:
-                await asyncio.wait_for(self._wake.wait(), timeout=delay)
-            except TimeoutError:
-                self._full_refresh_requested = True
 
 
 def _decimal_amount(transfer: dict[str, Any]) -> Decimal:

@@ -61,15 +61,6 @@ BEGIN
     END IF;
 END $$;
 
-CREATE TABLE IF NOT EXISTS watched_token_accounts (
-    address TEXT PRIMARY KEY,
-    mint TEXT NOT NULL REFERENCES watched_tokens(mint) ON DELETE CASCADE,
-    discovered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS watched_token_accounts_mint_idx
-    ON watched_token_accounts (mint);
-
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -239,34 +230,6 @@ class Database:
         )
         return [self._token(row) for row in rows]
 
-    async def replace_token_accounts(self, mint: str, addresses: set[str]) -> bool:
-        """Replace one mint's discovered accounts only when the set changed."""
-        async with self._pool().acquire() as conn:
-            async with conn.transaction():
-                rows = await conn.fetch(
-                    "SELECT address FROM watched_token_accounts WHERE mint = $1", mint
-                )
-                existing = {str(row["address"]) for row in rows}
-                if existing == addresses:
-                    return False
-                await conn.execute(
-                    "DELETE FROM watched_token_accounts WHERE mint = $1", mint
-                )
-                if addresses:
-                    await conn.execute(
-                        "INSERT INTO watched_token_accounts (address, mint) "
-                        "SELECT address, $2 FROM UNNEST($1::text[]) AS data(address)",
-                        sorted(addresses),
-                        mint,
-                    )
-                return True
-
-    async def get_token_accounts(self, mint: str) -> set[str]:
-        rows = await self._pool().fetch(
-            "SELECT address FROM watched_token_accounts WHERE mint = $1", mint
-        )
-        return {str(row["address"]) for row in rows}
-
     async def alert_delivery_states(self, signature: str) -> dict[tuple[str, str], str]:
         rows = await self._pool().fetch(
             "SELECT mint, buyer, status FROM alert_deliveries WHERE signature = $1",
@@ -327,13 +290,6 @@ class Database:
         )
         if not result.endswith("1"):
             raise RuntimeError("Alert delivery reservation was lost")
-
-    async def list_monitored_addresses(self) -> list[str]:
-        rows = await self._pool().fetch(
-            "SELECT mint AS address FROM watched_tokens "
-            "UNION SELECT address FROM watched_token_accounts ORDER BY address"
-        )
-        return [str(row["address"]) for row in rows]
 
     @staticmethod
     def _token(row: asyncpg.Record) -> WatchedToken:
