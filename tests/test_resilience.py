@@ -73,15 +73,25 @@ class HeliusCoverageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed, {MINT: {ATA_ONE, ATA_TWO}})
 
     async def test_discovers_token_accounts_for_both_token_programs(self) -> None:
-        calls = 0
+        calls: list[dict] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            pubkey = ATA_ONE if calls == 1 else ATA_TWO
-            return httpx.Response(
-                200, json={"jsonrpc": "2.0", "result": [{"pubkey": pubkey}]}
-            )
+            payload = json.loads(request.content)
+            calls.append(payload)
+            options = payload["params"][1]
+            if len(calls) == 1:
+                result = {
+                    "accounts": [{"pubkey": ATA_ONE}],
+                    "paginationKey": ATA_TWO,
+                }
+            elif options.get("paginationKey") == ATA_TWO:
+                result = {
+                    "accounts": [{"pubkey": ATA_TWO}],
+                    "paginationKey": None,
+                }
+            else:
+                result = {"accounts": [], "paginationKey": None}
+            return httpx.Response(200, json={"jsonrpc": "2.0", "result": result})
 
         client = HeliusClient("key", "secret", "https://app.test", "helius")
         await client.http.aclose()
@@ -91,6 +101,30 @@ class HeliusCoverageTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
         self.assertEqual(addresses, {ATA_ONE, ATA_TWO})
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(call["method"] == "getProgramAccountsV2" for call in calls))
+        self.assertNotIn("paginationKey", calls[0]["params"][1])
+        self.assertEqual(calls[1]["params"][1]["paginationKey"], ATA_TWO)
+        self.assertEqual(calls[0]["params"][1]["limit"], 10_000)
+
+    async def test_rejects_repeated_program_account_pagination_cursor(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "result": {"accounts": [], "paginationKey": ATA_ONE},
+                },
+            )
+
+        client = HeliusClient("key", "secret", "https://app.test", "helius")
+        await client.http.aclose()
+        client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            with self.assertRaisesRegex(HeliusError, "pagination cursor"):
+                await client.discover_token_accounts(MINT)
+        finally:
+            await client.close()
 
     async def test_logs_sanitized_token_discovery_rpc_error(self) -> None:
         api_key = "super-secret-helius-key"

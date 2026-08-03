@@ -25,6 +25,7 @@ USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 QUOTE_MINTS = {WSOL_MINT: "SOL", USDC_MINT: "USDC", USDT_MINT: "USDT"}
 BASE58_ALPHABET = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 MAX_PENDING_EVENT_BATCHES = 20
+PROGRAM_ACCOUNTS_PAGE_SIZE = 10_000
 
 
 class HeliusError(RuntimeError):
@@ -210,54 +211,79 @@ class HeliusClient:
         rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
         discovered: set[str] = set()
         for program_id in TOKEN_PROGRAMS:
-            try:
-                response = await self.http.post(
-                    rpc_url,
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": "solducks-token-accounts",
-                        "method": "getProgramAccounts",
-                        "params": [
-                            program_id,
-                            {
-                                "encoding": "base64",
-                                "dataSlice": {"offset": 0, "length": 0},
-                                "filters": [{"memcmp": {"offset": 0, "bytes": mint}}],
-                            },
-                        ],
-                    },
+            pagination_key: str | None = None
+            seen_pagination_keys: set[str] = set()
+            while True:
+                options: dict[str, Any] = {
+                    "encoding": "base64",
+                    "dataSlice": {"offset": 0, "length": 0},
+                    "filters": [{"memcmp": {"offset": 0, "bytes": mint}}],
+                    "limit": PROGRAM_ACCOUNTS_PAGE_SIZE,
+                }
+                if pagination_key is not None:
+                    options["paginationKey"] = pagination_key
+                try:
+                    response = await self.http.post(
+                        rpc_url,
+                        json={
+                            "jsonrpc": "2.0",
+                            "id": "solducks-token-accounts",
+                            "method": "getProgramAccountsV2",
+                            "params": [program_id, options],
+                        },
+                    )
+                except httpx.HTTPError as exc:
+                    raise HeliusError(
+                        "Could not discover token accounts for that mint."
+                    ) from exc
+                self._raise(
+                    response, "Could not discover token accounts for that mint."
                 )
-            except httpx.HTTPError as exc:
-                raise HeliusError(
-                    "Could not discover token accounts for that mint."
-                ) from exc
-            self._raise(response, "Could not discover token accounts for that mint.")
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                raise HeliusError(
-                    "Solana returned invalid token-account data."
-                ) from exc
-            if not isinstance(payload, dict):
-                raise HeliusError("Solana returned invalid token-account data.")
-            if payload.get("error"):
-                code, message = self._safe_rpc_error(payload["error"])
-                logger.warning(
-                    "Helius rejected token-account discovery (program=%s, code=%s): %s",
-                    program_id,
-                    code,
-                    message,
-                )
-                raise HeliusError(
-                    "Solana rejected the token-account discovery request."
-                )
-            result = payload.get("result")
-            if not isinstance(result, list):
-                raise HeliusError("Solana returned invalid token-account data.")
-            for item in result:
-                pubkey = item.get("pubkey") if isinstance(item, dict) else None
-                if isinstance(pubkey, str) and is_public_key(pubkey):
-                    discovered.add(pubkey)
+                try:
+                    payload = response.json()
+                except ValueError as exc:
+                    raise HeliusError(
+                        "Solana returned invalid token-account data."
+                    ) from exc
+                if not isinstance(payload, dict):
+                    raise HeliusError("Solana returned invalid token-account data.")
+                if payload.get("error"):
+                    code, message = self._safe_rpc_error(payload["error"])
+                    logger.warning(
+                        "Helius rejected token-account discovery "
+                        "(program=%s, code=%s): %s",
+                        program_id,
+                        code,
+                        message,
+                    )
+                    raise HeliusError(
+                        "Solana rejected the token-account discovery request."
+                    )
+                result = payload.get("result")
+                accounts = result.get("accounts") if isinstance(result, dict) else None
+                if not isinstance(accounts, list):
+                    raise HeliusError("Solana returned invalid token-account data.")
+                for item in accounts:
+                    pubkey = item.get("pubkey") if isinstance(item, dict) else None
+                    if isinstance(pubkey, str) and is_public_key(pubkey):
+                        discovered.add(pubkey)
+                if len(discovered) > self.max_monitored_addresses:
+                    raise HeliusError(
+                        "This token has more token accounts than the configured "
+                        "Helius webhook address limit."
+                    )
+
+                next_key = result.get("paginationKey")
+                if next_key is None:
+                    break
+                if not isinstance(next_key, str) or not next_key:
+                    raise HeliusError("Solana returned invalid pagination data.")
+                if next_key in seen_pagination_keys:
+                    raise HeliusError(
+                        "Solana returned a repeated token-account pagination cursor."
+                    )
+                seen_pagination_keys.add(next_key)
+                pagination_key = next_key
         return discovered
 
     async def sync_webhook(self, database: Database) -> str | None:
