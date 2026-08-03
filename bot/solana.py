@@ -287,6 +287,10 @@ class HeliusClient:
             "authHeader": self.webhook_secret,
             "txnStatus": "success",
         }
+        logger.info("Webhook %s body: %s", "PUT" if webhook_id else "POST", {
+            k: v if k != "authHeader" else "[redacted]"
+            for k, v in body.items()
+        })
         if remote and webhook_id:
             remote_webhook_type = remote.get("webhookType")
             matches = (
