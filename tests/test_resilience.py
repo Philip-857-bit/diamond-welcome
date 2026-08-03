@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import unittest
 from contextlib import asynccontextmanager
 from unittest.mock import patch
@@ -90,6 +91,39 @@ class HeliusCoverageTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
         self.assertEqual(addresses, {ATA_ONE, ATA_TWO})
+
+    async def test_logs_sanitized_token_discovery_rpc_error(self) -> None:
+        api_key = "super-secret-helius-key"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "code": -32010,
+                        "message": (
+                            f"Token account index unavailable\napi-key={api_key}"
+                        ),
+                    },
+                },
+            )
+
+        client = HeliusClient(api_key, "secret", "https://app.test", "helius")
+        await client.http.aclose()
+        client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            with self.assertLogs("bot.solana", logging.WARNING) as captured:
+                with self.assertRaisesRegex(HeliusError, "rejected"):
+                    await client.discover_token_accounts(MINT)
+        finally:
+            await client.close()
+
+        logged = " ".join(captured.output)
+        self.assertIn("code=-32010", logged)
+        self.assertIn("Token account index unavailable", logged)
+        self.assertNotIn(api_key, logged)
+        self.assertNotIn("\n", logged)
 
     async def test_rejects_unparsed_account_data_without_crashing(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:

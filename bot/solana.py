@@ -74,6 +74,19 @@ class HeliusClient:
     async def close(self) -> None:
         await self.http.aclose()
 
+    def _safe_rpc_error(self, error: Any) -> tuple[str, str]:
+        """Return bounded log fields without leaking credentials or control chars."""
+        if not isinstance(error, dict):
+            return "unknown", "No provider error details"
+
+        def clean(value: Any, limit: int) -> str:
+            text = " ".join(str(value).split()) if value is not None else "unknown"
+            if self.api_key:
+                text = text.replace(self.api_key, "[redacted]")
+            return text[:limit]
+
+        return clean(error.get("code"), 40), clean(error.get("message"), 300)
+
     async def validate_mint(self, mint: str, added_by: int) -> WatchedToken:
         if not is_public_key(mint):
             raise ValueError("That is not a valid Solana mint address.")
@@ -225,7 +238,16 @@ class HeliusClient:
                 raise HeliusError(
                     "Solana returned invalid token-account data."
                 ) from exc
-            if not isinstance(payload, dict) or payload.get("error"):
+            if not isinstance(payload, dict):
+                raise HeliusError("Solana returned invalid token-account data.")
+            if payload.get("error"):
+                code, message = self._safe_rpc_error(payload["error"])
+                logger.warning(
+                    "Helius rejected token-account discovery (program=%s, code=%s): %s",
+                    program_id,
+                    code,
+                    message,
+                )
                 raise HeliusError(
                     "Solana rejected the token-account discovery request."
                 )
