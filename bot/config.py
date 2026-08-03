@@ -99,3 +99,7 @@ LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 def setup_logging() -> None:
     """Configure root logger once at startup."""
     logging.basicConfig(format=LOG_FORMAT, level=logging.INFO)
+    # httpx logs complete request URLs at INFO. Those URLs contain the Helius
+    # API key and Telegram bot token, so retain only transport warnings/errors.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)

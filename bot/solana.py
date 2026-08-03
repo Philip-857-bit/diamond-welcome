@@ -98,14 +98,30 @@ class HeliusClient:
             raise HeliusError("Solana returned an invalid mint response.") from exc
         result = account_data.get("result") if isinstance(account_data, dict) else None
         value = result.get("value") if isinstance(result, dict) else None
-        parsed = (value or {}).get("data", {}).get("parsed", {})
-        if (
-            not value
-            or value.get("owner") not in TOKEN_PROGRAMS
-            or parsed.get("type") != "mint"
-        ):
+        data = value.get("data") if isinstance(value, dict) else None
+        parsed = data.get("parsed") if isinstance(data, dict) else None
+        info = parsed.get("info") if isinstance(parsed, dict) else None
+        if not isinstance(value, dict) or value.get("owner") not in TOKEN_PROGRAMS:
             raise ValueError("The address is not an SPL Token or Token-2022 mint.")
-        decimals = int(parsed.get("info", {}).get("decimals", 0))
+
+        if (
+            isinstance(parsed, dict)
+            and parsed.get("type") == "mint"
+            and isinstance(info, dict)
+        ):
+            try:
+                decimals = int(info["decimals"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise HeliusError("Solana returned invalid mint decimals.") from exc
+        else:
+            # RPC nodes may legitimately return base64 account data even when
+            # jsonParsed was requested. getTokenSupply provides a canonical
+            # mint check without requiring us to decode both token layouts.
+            decimals = await self._get_token_supply_decimals(rpc_url, mint)
+            if decimals is None:
+                raise ValueError("The address is not an SPL Token or Token-2022 mint.")
+        if not 0 <= decimals <= 255:
+            raise HeliusError("Solana returned invalid mint decimals.")
 
         name: str | None = None
         symbol: str | None = None
@@ -146,6 +162,35 @@ class HeliusClient:
             decimals=decimals,
             added_by=added_by,
         )
+
+    async def _get_token_supply_decimals(self, rpc_url: str, mint: str) -> int | None:
+        try:
+            response = await self.http.post(
+                rpc_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": "solducks-mint-supply",
+                    "method": "getTokenSupply",
+                    "params": [mint],
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise HeliusError("Could not reach Solana to validate that mint.") from exc
+        self._raise(response, "Could not validate the mint on Solana.")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HeliusError("Solana returned an invalid mint response.") from exc
+        if not isinstance(payload, dict) or payload.get("error") is not None:
+            return None
+        result = payload.get("result")
+        supply = result.get("value") if isinstance(result, dict) else None
+        if not isinstance(supply, dict):
+            return None
+        try:
+            return int(supply["decimals"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HeliusError("Solana returned invalid mint decimals.") from exc
 
     async def discover_token_accounts(self, mint: str) -> set[str]:
         """Find token accounts whose first 32 data bytes reference this mint."""

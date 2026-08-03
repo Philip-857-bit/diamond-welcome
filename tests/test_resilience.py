@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from contextlib import asynccontextmanager
 from unittest.mock import patch
@@ -89,6 +90,86 @@ class HeliusCoverageTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
         self.assertEqual(addresses, {ATA_ONE, ATA_TWO})
+
+    async def test_rejects_unparsed_account_data_without_crashing(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            method = json.loads(request.content)["method"]
+            if method == "getTokenSupply":
+                return httpx.Response(
+                    200,
+                    json={
+                        "jsonrpc": "2.0",
+                        "error": {"code": -32602, "message": "Invalid param"},
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "value": {
+                            "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                            "data": ["base64-account-data", "base64"],
+                        }
+                    },
+                },
+            )
+
+        client = HeliusClient("key", "secret", "https://app.test", "helius")
+        await client.http.aclose()
+        client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            with self.assertRaisesRegex(ValueError, "not an SPL Token"):
+                await client.validate_mint(MINT, 1)
+        finally:
+            await client.close()
+
+    async def test_accepts_unparsed_mint_via_token_supply_fallback(self) -> None:
+        methods: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            method = json.loads(request.content)["method"]
+            methods.append(method)
+            if method == "getAccountInfo":
+                return httpx.Response(
+                    200,
+                    json={
+                        "jsonrpc": "2.0",
+                        "result": {
+                            "value": {
+                                "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                                "data": ["base64-account-data", "base64"],
+                            }
+                        },
+                    },
+                )
+            if method == "getTokenSupply":
+                return httpx.Response(
+                    200,
+                    json={
+                        "jsonrpc": "2.0",
+                        "result": {
+                            "value": {
+                                "amount": "1000000000",
+                                "decimals": 9,
+                                "uiAmount": 1.0,
+                                "uiAmountString": "1",
+                            }
+                        },
+                    },
+                )
+            return httpx.Response(200, json={"jsonrpc": "2.0", "result": {}})
+
+        client = HeliusClient("key", "secret", "https://app.test", "helius")
+        await client.http.aclose()
+        client.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            token = await client.validate_mint(MINT, 1)
+        finally:
+            await client.close()
+
+        self.assertEqual(token.decimals, 9)
+        self.assertEqual(methods, ["getAccountInfo", "getTokenSupply", "getAsset"])
 
     async def test_matching_active_webhook_is_not_mutated(self) -> None:
         methods: list[str] = []

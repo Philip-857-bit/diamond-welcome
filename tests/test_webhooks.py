@@ -1,5 +1,6 @@
 import os
 import asyncio
+import logging
 import subprocess
 import sys
 import unittest
@@ -18,6 +19,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 
 from bot import __main__ as entrypoint
+from bot.config import setup_logging
 from bot.commands import (
     OWNER_COMMANDS,
     OPERATOR_COMMANDS,
@@ -41,6 +43,11 @@ class FakeDatabase:
 
 
 class CommandMenuTests(unittest.TestCase):
+    def test_setup_logging_suppresses_sensitive_http_urls(self) -> None:
+        setup_logging()
+        self.assertGreaterEqual(logging.getLogger("httpx").level, logging.WARNING)
+        self.assertGreaterEqual(logging.getLogger("httpcore").level, logging.WARNING)
+
     def test_only_id_is_public(self) -> None:
         self.assertEqual([command.command for command in PUBLIC_COMMANDS], ["id"])
         self.assertIn("watch", [command.command for command in OPERATOR_COMMANDS])
