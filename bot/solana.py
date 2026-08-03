@@ -406,26 +406,27 @@ class HeliusClient:
             raise HeliusError("Helius is temporarily unreachable.") from exc
         if allow_not_found and response.status_code == 404:
             return None
-        self._raise(response, "Helius rejected the webhook update.")
+        if not response.is_success:
+            detail = ""
+            try:
+                error_body = response.json()
+                if isinstance(error_body, dict):
+                    detail = f": {error_body.get('error') or error_body.get('message') or str(error_body)}"
+            except ValueError:
+                if response.text:
+                    detail = f": {response.text[:200]}"
+            address_count = len(body.get("accountAddresses", [])) if body else 0
+            logger.warning(
+                "Helius webhook %s %s failed (HTTP %s, %d addresses)%s",
+                method, url, response.status_code, address_count, detail,
+            )
+            raise HeliusError(
+                f"Helius rejected the webhook update (HTTP {response.status_code})"
+            )
         try:
             return response.json()
         except ValueError as exc:
             raise HeliusError("Helius returned an invalid response.") from exc
-
-    @staticmethod
-    def _raise(response: httpx.Response, message: str) -> None:
-        if not response.is_success:
-            detail = ""
-            try:
-                body = response.json()
-                if isinstance(body, dict):
-                    detail = body.get("error") or body.get("message") or str(body)
-            except ValueError:
-                body_text = response.text
-                detail = body_text[:200] if body_text else ""
-            if detail:
-                raise HeliusError(f"{message}: {detail} (HTTP {response.status_code})")
-            raise HeliusError(f"{message} (HTTP {response.status_code})")
 
 
 class WatchlistService:
