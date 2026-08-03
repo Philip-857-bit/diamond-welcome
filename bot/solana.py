@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -75,6 +76,75 @@ class HeliusClient:
     async def close(self) -> None:
         await self.http.aclose()
 
+    async def _rpc_post_with_retry(
+        self,
+        rpc_url: str,
+        payload: dict[str, Any],
+        *,
+        max_retries: int = 5,
+        base_delay: float = 1.0,
+    ) -> dict[str, Any]:
+        """POST to Helius RPC with jittered exponential backoff on 429 / 5xx."""
+        last_exc: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                response = await self.http.post(rpc_url, json=payload)
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt >= max_retries:
+                    raise
+                delay = base_delay * (2**attempt) + random.uniform(0, 1)
+                logger.warning(
+                    "RPC network error (attempt %d/%d), retrying in %.1fs",
+                    attempt + 1,
+                    max_retries,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            if response.is_success:
+                try:
+                    return response.json()
+                except ValueError as exc:
+                    raise HeliusError(
+                        "Solana returned a non-JSON response."
+                    ) from exc
+
+            status = response.status_code
+            if attempt >= max_retries or (status != 429 and status < 500):
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = {}
+                if isinstance(body, dict) and body.get("error"):
+                    code, message = self._safe_rpc_error(body["error"])
+                    raise HeliusError(
+                        f"RPC error [{code}]: {message} (HTTP {status})"
+                    )
+                raise HeliusError(
+                    f"RPC request failed (HTTP {status})"
+                )
+
+            retry_header = response.headers.get("Retry-After")
+            try:
+                delay = float(retry_header) if retry_header else None
+            except (TypeError, ValueError):
+                delay = None
+            if delay is None:
+                delay = base_delay * (2**attempt) + random.uniform(0, 1)
+            logger.warning(
+                "RPC rate-limited (attempt %d/%d, HTTP %s), retrying in %.1fs",
+                attempt + 1,
+                max_retries,
+                status,
+                delay,
+            )
+            await asyncio.sleep(delay)
+            last_exc = HeliusError(f"RPC request failed (HTTP {status})")
+
+        raise last_exc  # type: ignore[misc]
+
     def _safe_rpc_error(self, error: Any) -> tuple[str, str]:
         """Return bounded log fields without leaking credentials or control chars."""
         if not isinstance(error, dict):
@@ -93,24 +163,17 @@ class HeliusClient:
             raise ValueError("That is not a valid Solana mint address.")
 
         rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
-        try:
-            account_response = await self.http.post(
-                rpc_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": "solducks-mint",
-                    "method": "getAccountInfo",
-                    "params": [mint, {"encoding": "jsonParsed"}],
-                },
-            )
-        except httpx.HTTPError as exc:
-            raise HeliusError("Could not reach Solana to validate that mint.") from exc
-        self._raise(account_response, "Could not validate the mint on Solana.")
-        try:
-            account_data = account_response.json()
-        except ValueError as exc:
-            raise HeliusError("Solana returned an invalid mint response.") from exc
-        result = account_data.get("result") if isinstance(account_data, dict) else None
+
+        account_payload = await self._rpc_post_with_retry(
+            rpc_url,
+            {
+                "jsonrpc": "2.0",
+                "id": "solducks-mint",
+                "method": "getAccountInfo",
+                "params": [mint, {"encoding": "jsonParsed"}],
+            },
+        )
+        result = account_payload.get("result") if isinstance(account_payload, dict) else None
         value = result.get("value") if isinstance(result, dict) else None
         data = value.get("data") if isinstance(value, dict) else None
         parsed = data.get("parsed") if isinstance(data, dict) else None
@@ -140,23 +203,22 @@ class HeliusClient:
         name: str | None = None
         symbol: str | None = None
         try:
-            metadata_response = await self.http.post(
+            metadata_payload = await self._rpc_post_with_retry(
                 rpc_url,
-                json={
+                {
                     "jsonrpc": "2.0",
                     "id": "solducks-metadata",
                     "method": "getAsset",
                     "params": {"id": mint},
                 },
             )
-            metadata_data = (
-                metadata_response.json() if metadata_response.is_success else {}
-            )
-        except (httpx.HTTPError, ValueError):
-            metadata_data = {}
-        if metadata_data:
+        except HeliusError:
+            metadata_payload = {}
+        if metadata_payload:
             metadata_result = (
-                metadata_data.get("result") if isinstance(metadata_data, dict) else None
+                metadata_payload.get("result")
+                if isinstance(metadata_payload, dict)
+                else None
             )
             content = (
                 metadata_result.get("content")
@@ -178,23 +240,15 @@ class HeliusClient:
         )
 
     async def _get_token_supply_decimals(self, rpc_url: str, mint: str) -> int | None:
-        try:
-            response = await self.http.post(
-                rpc_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": "solducks-mint-supply",
-                    "method": "getTokenSupply",
-                    "params": [mint],
-                },
-            )
-        except httpx.HTTPError as exc:
-            raise HeliusError("Could not reach Solana to validate that mint.") from exc
-        self._raise(response, "Could not validate the mint on Solana.")
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise HeliusError("Solana returned an invalid mint response.") from exc
+        payload = await self._rpc_post_with_retry(
+            rpc_url,
+            {
+                "jsonrpc": "2.0",
+                "id": "solducks-mint-supply",
+                "method": "getTokenSupply",
+                "params": [mint],
+            },
+        )
         if not isinstance(payload, dict) or payload.get("error") is not None:
             return None
         result = payload.get("result")
@@ -222,29 +276,15 @@ class HeliusClient:
                 }
                 if pagination_key is not None:
                     options["paginationKey"] = pagination_key
-                try:
-                    response = await self.http.post(
-                        rpc_url,
-                        json={
-                            "jsonrpc": "2.0",
-                            "id": "solducks-token-accounts",
-                            "method": "getProgramAccountsV2",
-                            "params": [program_id, options],
-                        },
-                    )
-                except httpx.HTTPError as exc:
-                    raise HeliusError(
-                        "Could not discover token accounts for that mint."
-                    ) from exc
-                self._raise(
-                    response, "Could not discover token accounts for that mint."
+                payload = await self._rpc_post_with_retry(
+                    rpc_url,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "solducks-token-accounts",
+                        "method": "getProgramAccountsV2",
+                        "params": [program_id, options],
+                    },
                 )
-                try:
-                    payload = response.json()
-                except ValueError as exc:
-                    raise HeliusError(
-                        "Solana returned invalid token-account data."
-                    ) from exc
                 if not isinstance(payload, dict):
                     raise HeliusError("Solana returned invalid token-account data.")
                 if payload.get("error"):

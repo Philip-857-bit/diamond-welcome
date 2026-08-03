@@ -215,6 +215,7 @@ async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         token, created = await watchlist.add(mint, update.effective_user.id)
     except (ValueError, HeliusError) as exc:
+        logger.warning("/watch %s failed: %s", mint, exc)
         await update.effective_message.reply_text(str(exc))
         return
     label = token.symbol or token.name or token.mint
