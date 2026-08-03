@@ -415,6 +415,16 @@ class HeliusClient:
     @staticmethod
     def _raise(response: httpx.Response, message: str) -> None:
         if not response.is_success:
+            detail = ""
+            try:
+                body = response.json()
+                if isinstance(body, dict):
+                    detail = body.get("error") or body.get("message") or str(body)
+            except ValueError:
+                body_text = response.text
+                detail = body_text[:200] if body_text else ""
+            if detail:
+                raise HeliusError(f"{message}: {detail} (HTTP {response.status_code})")
             raise HeliusError(f"{message} (HTTP {response.status_code})")
 
 
