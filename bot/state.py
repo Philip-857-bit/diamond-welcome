@@ -31,8 +31,13 @@ class PendingUsers:
         self._data: dict[tuple[int, int], PendingUser] = {}
 
     def set(
-        self, chat_id: int, user_id: int, *, correct_answer: int,
-        message_id: int, first_name: str,
+        self,
+        chat_id: int,
+        user_id: int,
+        *,
+        correct_answer: int,
+        message_id: int,
+        first_name: str,
     ) -> None:
         self._data[(chat_id, user_id)] = PendingUser(
             correct_answer=correct_answer,

@@ -1,1 +1,1 @@
-"""Telegram Welcome & Anti-Spam Math CAPTCHA Bot."""
+"""SolDucks Telegram community and Solana buy-alert bot."""

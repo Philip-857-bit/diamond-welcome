@@ -120,7 +120,8 @@ async def new_member_handler(
 
         # Store pending state
         pending_users.set(
-            chat_id, user_id,
+            chat_id,
+            user_id,
             correct_answer=correct,
             message_id=msg.message_id,
             first_name=first_name,
@@ -144,16 +145,16 @@ async def new_member_handler(
 
         logger.info(
             "CAPTCHA sent to %s (%s) in chat %s",
-            first_name, user_id, chat_id,
+            first_name,
+            user_id,
+            chat_id,
         )
 
 
 # ─── F3 & F4: Inline button presses ──────────────────────────────────────────
 
 
-async def button_handler(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle CAPTCHA answer button clicks."""
     query = update.callback_query
     if not query or not query.data:
@@ -171,9 +172,7 @@ async def button_handler(
 
     # F3.2: Non-target user clicked
     if clicker_id != target_user_id:
-        await query.answer(
-            "This verification button is not for you!", show_alert=True
-        )
+        await query.answer("This verification button is not for you!", show_alert=True)
         return
 
     chat_id = query.message.chat.id
@@ -246,7 +245,9 @@ async def button_handler(
 
     logger.info(
         "User %s (%s) verified in chat %s",
-        first_name, target_user_id, chat_id,
+        first_name,
+        target_user_id,
+        chat_id,
     )
 
 
@@ -287,7 +288,9 @@ async def timeout_kick(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     logger.info(
         "Kicked %s (%s) from chat %s — verification timed out",
-        first_name, user_id, chat_id,
+        first_name,
+        user_id,
+        chat_id,
     )
 
 
@@ -331,7 +334,9 @@ async def auto_delete_captcha(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     logger.info(
         "Auto-deleted CAPTCHA and kicked %s (%s) from chat %s — no interaction",
-        first_name, user_id, chat_id,
+        first_name,
+        user_id,
+        chat_id,
     )
 
 

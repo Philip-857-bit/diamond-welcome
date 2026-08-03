@@ -1,10 +1,10 @@
 services:
-  welcome-bot:
+  solducks:
     build: .
     restart: always
     env_file: .env
     deploy:
       resources:
         limits:
-          memory: 128M
+          memory: 256M
           cpus: "0.5"

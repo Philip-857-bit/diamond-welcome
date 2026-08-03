@@ -1,11 +1,19 @@
 services:
   - type: web
     runtime: docker
-    name: diamond-welcome-bot
+    name: solducks-bot
     plan: free
     healthCheckPath: /
     envVars:
       - key: BOT_TOKEN
         sync: false
       - key: WEBHOOK_SECRET
+        sync: false
+      - key: OWNER_USER_ID
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: HELIUS_WEBHOOK_SECRET
         sync: false
