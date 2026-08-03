@@ -241,7 +241,7 @@ class HeliusClient:
         return await self._sync_one_webhook(
             database,
             setting_key="helius_webhook_id",
-            transaction_types={"SWAP", "BUY"},
+            transaction_types={"SWAP"},
             addresses=mints,
         )
 

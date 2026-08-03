@@ -131,7 +131,7 @@ class HeliusCoverageTests(unittest.IsolatedAsyncioTestCase):
                 json={
                     "webhookID": "webhook-id",
                     "webhookURL": "https://app.test/helius",
-                    "transactionTypes": ["BUY", "SWAP"],
+                    "transactionTypes": ["SWAP"],
                     "accountAddresses": [MINT],
                     "authHeader": "secret",
                     "active": True,
