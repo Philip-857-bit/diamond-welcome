@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -26,7 +25,6 @@ USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 QUOTE_MINTS = {WSOL_MINT: "SOL", USDC_MINT: "USDC", USDT_MINT: "USDT"}
 BASE58_ALPHABET = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 MAX_PENDING_EVENT_BATCHES = 20
-PROGRAM_ACCOUNTS_PAGE_SIZE = 10_000
 
 
 class HeliusError(RuntimeError):
@@ -81,28 +79,17 @@ class HeliusClient:
         rpc_url: str,
         payload: dict[str, Any],
         *,
-        max_retries: int = 5,
-        base_delay: float = 1.0,
+        max_retries: int = 2,
     ) -> dict[str, Any]:
-        """POST to Helius RPC with jittered exponential backoff on 429 / 5xx."""
+        """POST to Helius RPC with a short retry on 429."""
         method = payload.get("method", "unknown")
-        last_exc: Exception | None = None
         for attempt in range(max_retries + 1):
             try:
                 response = await self.http.post(rpc_url, json=payload)
             except httpx.HTTPError as exc:
-                last_exc = exc
                 if attempt >= max_retries:
                     raise
-                delay = base_delay * (2**attempt) + random.uniform(0, 1)
-                logger.warning(
-                    "%s network error (attempt %d/%d), retrying in %.1fs",
-                    method,
-                    attempt + 1,
-                    max_retries,
-                    delay,
-                )
-                await asyncio.sleep(delay)
+                await asyncio.sleep(2)
                 continue
 
             if response.is_success:
@@ -113,8 +100,8 @@ class HeliusClient:
                         "Solana returned a non-JSON response."
                     ) from exc
 
-            status = response.status_code
-            if attempt >= max_retries or (status != 429 and status < 500):
+            if response.status_code != 429 or attempt >= max_retries:
+                status = response.status_code
                 try:
                     body = response.json()
                 except ValueError:
@@ -130,22 +117,13 @@ class HeliusClient:
 
             retry_header = response.headers.get("Retry-After")
             try:
-                delay = float(retry_header) if retry_header else None
+                delay = max(2, int(retry_header)) if retry_header else 2
             except (TypeError, ValueError):
-                delay = None
-            if delay is None:
-                delay = base_delay * (2**attempt) + random.uniform(0, 1)
-            logger.warning(
-                "%s rate-limited (attempt %d/%d), retrying in %.1fs",
-                method,
-                attempt + 1,
-                max_retries,
-                delay,
-            )
+                delay = 2
+            logger.warning("%s rate-limited (attempt %d/%d), retrying in %ds", method, attempt + 1, max_retries, delay)
             await asyncio.sleep(delay)
-            last_exc = HeliusError(f"RPC request failed (HTTP {status})")
 
-        raise last_exc  # type: ignore[misc]
+        raise HeliusError("RPC retry limit exhausted")
 
     def _safe_rpc_error(self, error: Any) -> tuple[str, str]:
         """Return bounded log fields without leaking credentials or control chars."""
@@ -263,69 +241,53 @@ class HeliusClient:
             raise HeliusError("Solana returned invalid mint decimals.") from exc
 
     async def discover_token_accounts(self, mint: str) -> set[str]:
-        """Find token accounts whose first 32 data bytes reference this mint."""
+        """Find token accounts for a mint via Helius DAS getTokenAccounts."""
         rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
         discovered: set[str] = set()
-        for program_id in TOKEN_PROGRAMS:
-            pagination_key: str | None = None
-            seen_pagination_keys: set[str] = set()
-            while True:
-                options: dict[str, Any] = {
-                    "encoding": "base64",
-                    "dataSlice": {"offset": 0, "length": 0},
-                    "filters": [{"memcmp": {"offset": 0, "bytes": mint}}],
-                    "limit": PROGRAM_ACCOUNTS_PAGE_SIZE,
-                }
-                if pagination_key is not None:
-                    options["paginationKey"] = pagination_key
-                payload = await self._rpc_post_with_retry(
-                    rpc_url,
-                    {
-                        "jsonrpc": "2.0",
-                        "id": "solducks-token-accounts",
-                        "method": "getProgramAccountsV2",
-                        "params": [program_id, options],
-                    },
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            params: dict[str, Any] = {"mint": mint, "limit": 100}
+            if cursor is not None:
+                params["cursor"] = cursor
+            payload = await self._rpc_post_with_retry(
+                rpc_url,
+                {
+                    "jsonrpc": "2.0",
+                    "id": "solducks-token-accounts",
+                    "method": "getTokenAccounts",
+                    "params": params,
+                },
+            )
+            if not isinstance(payload, dict):
+                raise HeliusError("Helius returned invalid token-account data.")
+            if payload.get("error"):
+                code, message = self._safe_rpc_error(payload["error"])
+                logger.warning("DAS rejected token-account discovery (code=%s): %s", code, message)
+                raise HeliusError("Helius rejected the token-account discovery request.")
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                raise HeliusError("Helius returned invalid token-account data.")
+            accounts = result.get("token_accounts")
+            if not isinstance(accounts, list):
+                raise HeliusError("Helius returned invalid token-account data.")
+            for item in accounts:
+                address = item.get("address") if isinstance(item, dict) else None
+                if isinstance(address, str) and is_public_key(address):
+                    discovered.add(address)
+            if len(discovered) > self.max_monitored_addresses:
+                raise HeliusError(
+                    "This token has more token accounts than the configured "
+                    "Helius webhook address limit."
                 )
-                if not isinstance(payload, dict):
-                    raise HeliusError("Solana returned invalid token-account data.")
-                if payload.get("error"):
-                    code, message = self._safe_rpc_error(payload["error"])
-                    logger.warning(
-                        "Helius rejected token-account discovery "
-                        "(program=%s, code=%s): %s",
-                        program_id,
-                        code,
-                        message,
-                    )
-                    raise HeliusError(
-                        "Solana rejected the token-account discovery request."
-                    )
-                result = payload.get("result")
-                accounts = result.get("accounts") if isinstance(result, dict) else None
-                if not isinstance(accounts, list):
-                    raise HeliusError("Solana returned invalid token-account data.")
-                for item in accounts:
-                    pubkey = item.get("pubkey") if isinstance(item, dict) else None
-                    if isinstance(pubkey, str) and is_public_key(pubkey):
-                        discovered.add(pubkey)
-                if len(discovered) > self.max_monitored_addresses:
-                    raise HeliusError(
-                        "This token has more token accounts than the configured "
-                        "Helius webhook address limit."
-                    )
-
-                next_key = result.get("paginationKey")
-                if next_key is None:
-                    break
-                if not isinstance(next_key, str) or not next_key:
-                    raise HeliusError("Solana returned invalid pagination data.")
-                if next_key in seen_pagination_keys:
-                    raise HeliusError(
-                        "Solana returned a repeated token-account pagination cursor."
-                    )
-                seen_pagination_keys.add(next_key)
-                pagination_key = next_key
+            cursor = result.get("cursor")
+            if not cursor:
+                break
+            if not isinstance(cursor, str):
+                raise HeliusError("Helius returned invalid pagination data.")
+            if cursor in seen_cursors:
+                raise HeliusError("Helius returned a repeated token-account pagination cursor.")
+            seen_cursors.add(cursor)
         return discovered
 
     async def sync_webhook(self, database: Database) -> str | None:

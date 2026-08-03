@@ -72,25 +72,25 @@ class HeliusCoverageTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(observed, {MINT: {ATA_ONE, ATA_TWO}})
 
-    async def test_discovers_token_accounts_for_both_token_programs(self) -> None:
+    async def test_discovers_token_accounts_via_das(self) -> None:
         calls: list[dict] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             payload = json.loads(request.content)
             calls.append(payload)
-            options = payload["params"][1]
-            if len(calls) == 1:
+            cursor = payload["params"].get("cursor")
+            if cursor is None:
                 result = {
-                    "accounts": [{"pubkey": ATA_ONE}],
-                    "paginationKey": ATA_TWO,
+                    "token_accounts": [{"address": ATA_ONE}],
+                    "cursor": "page-2",
                 }
-            elif options.get("paginationKey") == ATA_TWO:
+            elif cursor == "page-2":
                 result = {
-                    "accounts": [{"pubkey": ATA_TWO}],
-                    "paginationKey": None,
+                    "token_accounts": [{"address": ATA_TWO}],
+                    "cursor": None,
                 }
             else:
-                result = {"accounts": [], "paginationKey": None}
+                result = {"token_accounts": [], "cursor": None}
             return httpx.Response(200, json={"jsonrpc": "2.0", "result": result})
 
         client = HeliusClient("key", "secret", "https://app.test", "helius")
@@ -101,19 +101,20 @@ class HeliusCoverageTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
         self.assertEqual(addresses, {ATA_ONE, ATA_TWO})
-        self.assertEqual(len(calls), 3)
-        self.assertTrue(all(call["method"] == "getProgramAccountsV2" for call in calls))
-        self.assertNotIn("paginationKey", calls[0]["params"][1])
-        self.assertEqual(calls[1]["params"][1]["paginationKey"], ATA_TWO)
-        self.assertEqual(calls[0]["params"][1]["limit"], 10_000)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(call["method"] == "getTokenAccounts" for call in calls))
+        self.assertEqual(calls[0]["params"]["mint"], MINT)
+        self.assertNotIn("cursor", calls[0]["params"])
+        self.assertEqual(calls[1]["params"]["cursor"], "page-2")
+        self.assertEqual(calls[0]["params"]["limit"], 100)
 
-    async def test_rejects_repeated_program_account_pagination_cursor(self) -> None:
+    async def test_rejects_repeated_das_pagination_cursor(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,
                 json={
                     "jsonrpc": "2.0",
-                    "result": {"accounts": [], "paginationKey": ATA_ONE},
+                    "result": {"token_accounts": [], "cursor": ATA_ONE},
                 },
             )
 
