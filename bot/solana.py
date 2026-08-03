@@ -85,6 +85,7 @@ class HeliusClient:
         base_delay: float = 1.0,
     ) -> dict[str, Any]:
         """POST to Helius RPC with jittered exponential backoff on 429 / 5xx."""
+        method = payload.get("method", "unknown")
         last_exc: Exception | None = None
         for attempt in range(max_retries + 1):
             try:
@@ -95,7 +96,8 @@ class HeliusClient:
                     raise
                 delay = base_delay * (2**attempt) + random.uniform(0, 1)
                 logger.warning(
-                    "RPC network error (attempt %d/%d), retrying in %.1fs",
+                    "%s network error (attempt %d/%d), retrying in %.1fs",
+                    method,
                     attempt + 1,
                     max_retries,
                     delay,
@@ -134,10 +136,10 @@ class HeliusClient:
             if delay is None:
                 delay = base_delay * (2**attempt) + random.uniform(0, 1)
             logger.warning(
-                "RPC rate-limited (attempt %d/%d, HTTP %s), retrying in %.1fs",
+                "%s rate-limited (attempt %d/%d), retrying in %.1fs",
+                method,
                 attempt + 1,
                 max_retries,
-                status,
                 delay,
             )
             await asyncio.sleep(delay)
