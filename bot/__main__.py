@@ -44,7 +44,7 @@ from bot.alerts import AlertWorker
 from bot.commands import CommandRegistry, register_command_handlers
 from bot.database import Database
 from bot.error_handler import error_handler
-from bot.handlers import button_handler, new_member_handler
+from bot.handlers import button_handler, left_member_handler, new_member_handler
 from bot.solana import HeliusClient, WatchlistService
 
 logger = logging.getLogger(__name__)
@@ -131,6 +131,9 @@ def build_application() -> Application:
 
     app.add_handler(
         MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_handler)
+    )
+    app.add_handler(
+        MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, left_member_handler)
     )
     app.add_handler(CallbackQueryHandler(button_handler, pattern=r"^verify:"))
     register_command_handlers(app)

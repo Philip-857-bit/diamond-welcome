@@ -340,6 +340,21 @@ async def auto_delete_captcha(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+# ─── Service message cleanup ──────────────────────────────────────────────────
+
+
+async def left_member_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Delete Telegram's 'user was removed' service message after a kick."""
+    if not update.message or not update.message.left_chat_member:
+        return
+    try:
+        await update.message.delete()
+    except BadRequest as exc:
+        logger.warning("Failed to delete left-member service message: %s", exc)
+
+
 # ─── Cleanup helper ───────────────────────────────────────────────────────────
 
 
