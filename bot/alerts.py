@@ -13,6 +13,7 @@ from telegram import Bot
 from telegram.error import BadRequest, NetworkError, RetryAfter
 
 from bot.database import Database
+from bot.prices import get_sol_price
 from bot.solana import BuyAlert, parse_buys
 
 logger = logging.getLogger(__name__)
@@ -35,12 +36,28 @@ def _short(address: str) -> str:
     return f"{address[:5]}…{address[-5:]}"
 
 
-def build_caption(alert: BuyAlert) -> str:
+def _usd_str(
+    amount: Decimal, symbol: str | None, sol_price: Decimal | None
+) -> str | None:
+    if symbol == "SOL" and sol_price is not None and sol_price > 0:
+        usd = amount * sol_price
+        return f"${_number(usd)}"
+    if symbol in {"USDC", "USDT"}:
+        return f"${_number(amount)}"
+    return None
+
+
+def build_caption(alert: BuyAlert, sol_price: Decimal | None = None) -> str:
     name = html.escape(alert.token.name or alert.token.symbol or "Watched token")
     symbol = html.escape(alert.token.symbol or "TOKEN")
     payment = "Not detected"
     if alert.payment_amount is not None and alert.payment_symbol:
-        payment = f"{_number(alert.payment_amount)} {html.escape(alert.payment_symbol)}"
+        native = f"{_number(alert.payment_amount)} {html.escape(alert.payment_symbol)}"
+        usd = _usd_str(alert.payment_amount, alert.payment_symbol, sol_price)
+        if usd:
+            payment = f"{native} ({usd})"
+        else:
+            payment = native
     tx_url = f"https://solscan.io/tx/{html.escape(alert.signature, quote=True)}"
     return (
         "🦆🚀 <b>SolDucks Buy Alert!</b> 🚀🦆\n\n"
@@ -261,7 +278,8 @@ class AlertWorker:
         if chat_value is None:
             raise RuntimeError("Alert chat is not configured")
         chat_id = int(chat_value)
-        caption = build_caption(alert)
+        sol_price = await get_sol_price()
+        caption = build_caption(alert, sol_price)
         cached_id = await self.database.get_setting("alert_animation_file_id")
         has_local_animation = os.path.isfile(self.animation_path)
         if not cached_id and not has_local_animation:
