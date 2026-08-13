@@ -3,7 +3,14 @@ import unittest
 
 from bot.alerts import build_caption
 from bot.database import WatchedToken
-from bot.solana import USDC_MINT, USDT_MINT, BuyAlert, is_public_key, parse_buys
+from bot.solana import (
+    USDC_MINT,
+    USDT_MINT,
+    WSOL_MINT,
+    BuyAlert,
+    is_public_key,
+    parse_buys,
+)
 
 
 MINT = "So11111111111111111111111111111111111111112"
@@ -81,6 +88,69 @@ class BuyParserTests(unittest.TestCase):
         self.assertEqual(alert.buyer, BUYER)
         self.assertEqual(alert.token_amount, Decimal("12.5"))
         self.assertEqual(alert.payment_amount, Decimal("0.75"))
+        self.assertEqual(alert.payment_symbol, "SOL")
+
+    def test_combines_structured_wsol_and_native_sol_inputs(self) -> None:
+        token_mint = "HNCz9mGVK7hJwmR5PBJYCVnCiACNtbqTADuBeG6spump"
+        token = WatchedToken(
+            mint=token_mint,
+            name="SoLDuck",
+            symbol="SoLDuck",
+            decimals=6,
+            added_by=1,
+        )
+        event = {
+            "type": "SWAP",
+            "signature": "signature-mixed-sol-inputs",
+            "feePayer": BUYER,
+            "transactionError": None,
+            "events": {
+                "swap": {
+                    "nativeInput": {"account": BUYER, "amount": "65110986"},
+                    "nativeOutput": None,
+                    "tokenInputs": [
+                        {
+                            "userAccount": BUYER,
+                            "mint": WSOL_MINT,
+                            "rawTokenAmount": {
+                                "tokenAmount": "558187",
+                                "decimals": 9,
+                            },
+                        }
+                    ],
+                    "tokenOutputs": [
+                        {
+                            "userAccount": BUYER,
+                            "mint": token_mint,
+                            "rawTokenAmount": {
+                                "tokenAmount": "1262894322413",
+                                "decimals": 6,
+                            },
+                        }
+                    ],
+                }
+            },
+            # These raw transfers deliberately include account rent. Structured
+            # swap inputs, rather than the raw list, must determine the payment.
+            "nativeTransfers": [
+                {
+                    "fromUserAccount": BUYER,
+                    "toUserAccount": POOL,
+                    "amount": 65_110_986,
+                },
+                {
+                    "fromUserAccount": BUYER,
+                    "toUserAccount": token_mint,
+                    "amount": 2_074_080,
+                },
+            ],
+            "tokenTransfers": [],
+        }
+
+        alert = parse_buys(event, {token_mint: token})[0]
+
+        self.assertEqual(alert.token_amount, Decimal("1262894.322413"))
+        self.assertEqual(alert.payment_amount, Decimal("0.065669173"))
         self.assertEqual(alert.payment_symbol, "SOL")
 
     def test_ignores_non_swap_activity_from_any_webhook(self) -> None:

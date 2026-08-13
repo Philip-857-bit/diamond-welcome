@@ -552,22 +552,23 @@ def _parse_structured_swap(
                     symbol, Decimal(0)
                 ) + _decimal_amount(item)
 
+        native_input = swap.get("nativeInput")
+        if isinstance(native_input, dict) and native_input.get("account") == buyer:
+            try:
+                lamports = Decimal(str(native_input.get("amount", 0)))
+            except (InvalidOperation, TypeError, ValueError):
+                lamports = Decimal(0)
+            if lamports > 0:
+                quote_totals["SOL"] = quote_totals.get(
+                    "SOL", Decimal(0)
+                ) + lamports / Decimal(1_000_000_000)
+
         payment_symbol: str | None = None
         payment_amount: Decimal | None = None
         if quote_totals:
             payment_symbol, payment_amount = max(
                 quote_totals.items(), key=lambda item: item[1]
             )
-        else:
-            native_input = swap.get("nativeInput")
-            if isinstance(native_input, dict) and native_input.get("account") == buyer:
-                try:
-                    lamports = Decimal(str(native_input.get("amount", 0)))
-                except (InvalidOperation, TypeError, ValueError):
-                    lamports = Decimal(0)
-                if lamports > 0:
-                    payment_amount = lamports / Decimal(1_000_000_000)
-                    payment_symbol = "SOL"
 
         results.append(
             BuyAlert(
