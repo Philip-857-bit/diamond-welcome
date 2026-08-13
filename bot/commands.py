@@ -41,6 +41,9 @@ OWNER_COMMANDS = OPERATOR_COMMANDS + [
     BotCommand("allow", "Add an operator Telegram ID"),
     BotCommand("disallow", "Remove an operator Telegram ID"),
     BotCommand("users", "List allowlisted operators"),
+    BotCommand("exempt", "Skip CAPTCHA for a Telegram user, username, or name"),
+    BotCommand("unexempt", "Re-enable CAPTCHA for an exempted user"),
+    BotCommand("exemptlist", "List CAPTCHA-exempt users/bots"),
     BotCommand("setalert", "Set the alert Telegram chat ID"),
     BotCommand("retrydead", "Replay dead-lettered alerts"),
     BotCommand("retryuncertain", "Confirm replay of uncertain alerts"),
@@ -51,9 +54,26 @@ WIZARD_ACTIONS = {
     "unwatch": ("Send the Solana token mint to remove.", "token mint"),
     "allow": ("Send the Telegram user ID to allow.", "user ID"),
     "disallow": ("Send the Telegram user ID to remove.", "user ID"),
+    "exempt": (
+        "Send the Telegram user ID, @username, or display name to exempt from CAPTCHA.",
+        "user/username/name",
+    ),
+    "unexempt": (
+        "Send the Telegram user ID, @username, or display name to un-exempt.",
+        "user/username/name",
+    ),
     "setalert": ("Send the destination Telegram chat ID.", "chat ID"),
 }
-OWNER_MENU_ACTIONS = {"allow", "disallow", "users", "setalert", "retryuncertain"}
+OWNER_MENU_ACTIONS = {
+    "allow",
+    "disallow",
+    "users",
+    "exempt",
+    "unexempt",
+    "exemptlist",
+    "setalert",
+    "retryuncertain",
+}
 
 
 class CommandRegistry:
@@ -186,6 +206,17 @@ def _menu_keyboard(*, owner: bool) -> InlineKeyboardMarkup:
                     InlineKeyboardButton("👥 Users", callback_data="solducks:users"),
                     InlineKeyboardButton(
                         "📣 Alert chat", callback_data="solducks:setalert"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "✅ Exempt bot", callback_data="solducks:exempt"
+                    ),
+                    InlineKeyboardButton(
+                        "⛔ Unexempt", callback_data="solducks:unexempt"
+                    ),
+                    InlineKeyboardButton(
+                        "🤖 Exempt list", callback_data="solducks:exemptlist"
                     ),
                 ],
                 [
@@ -344,6 +375,83 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await _reply_chunks(update, "Allowlisted users:\n" + "\n".join(lines))
 
 
+def _exempt_identifier(raw: str) -> str | None:
+    """Normalize an exemption target into a stable stored identifier.
+
+    Accepts a numeric Telegram user/bot ID, an ``@username``, or a bare
+    display name. Bare names are stored case-insensitively with a ``name:``
+    prefix so they cannot collide with a numeric ID or username.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return None
+    if value.startswith("@"):
+        username = value[1:].strip().lower()
+        return f"@{username}" if username else None
+    try:
+        user_id = int(value)
+    except ValueError:
+        return f"name:{value.lower()}"
+    if user_id <= 0 or user_id >= 2**63:
+        return None
+    return str(user_id)
+
+
+async def exempt_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _authorize(update, context, owner=True):
+        return
+    raw = _one_arg(context)
+    identifier = _exempt_identifier(raw or "")
+    if identifier is None:
+        await update.effective_message.reply_text(
+            "Usage: /exempt <telegram_user_id | @username | display_name>"
+        )
+        return
+    database, _, _ = _services(context)
+    created = await database.add_exempt(identifier, OWNER_USER_ID)
+    await update.effective_message.reply_text(
+        "User/bot exempted from CAPTCHA."
+        if created
+        else "That user/bot is already exempt."
+    )
+
+
+async def unexempt_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _authorize(update, context, owner=True):
+        return
+    raw = _one_arg(context)
+    identifier = _exempt_identifier(raw or "")
+    if identifier is None:
+        await update.effective_message.reply_text(
+            "Usage: /unexempt <telegram_user_id | @username | display_name>"
+        )
+        return
+    database, _, _ = _services(context)
+    removed = await database.remove_exempt(identifier)
+    await update.effective_message.reply_text(
+        "User/bot removed from the exemption list."
+        if removed
+        else "That user/bot was not exempt."
+    )
+
+
+async def exemptlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _authorize(update, context, owner=True):
+        return
+    database, _, _ = _services(context)
+    identifiers = await database.list_exempt()
+    if not identifiers:
+        await update.effective_message.reply_text(
+            "No exempt users/bots are currently configured."
+        )
+        return
+    await _reply_chunks(
+        update,
+        "CAPTCHA-exempt users/bots:\n"
+        + "\n".join(identifier for identifier in identifiers),
+    )
+
+
 async def setalert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _authorize(update, context, owner=True):
         return
@@ -480,6 +588,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "tokens": tokens_command,
         "status": status_command,
         "users": users_command,
+        "exemptlist": exemptlist_command,
         "retrydead": retrydead_command,
     }
     if action == "retryuncertain_confirm":
@@ -505,6 +614,8 @@ async def wizard_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "unwatch": unwatch_command,
         "allow": allow_command,
         "disallow": disallow_command,
+        "exempt": exempt_command,
+        "unexempt": unexempt_command,
         "setalert": setalert_command,
     }
     await handlers[action](update, context)
@@ -535,6 +646,9 @@ def register_command_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("allow", allow_command))
     application.add_handler(CommandHandler("disallow", disallow_command))
     application.add_handler(CommandHandler("users", users_command))
+    application.add_handler(CommandHandler("exempt", exempt_command))
+    application.add_handler(CommandHandler("unexempt", unexempt_command))
+    application.add_handler(CommandHandler("exemptlist", exemptlist_command))
     application.add_handler(CommandHandler("setalert", setalert_command))
     application.add_handler(CommandHandler("retrydead", retrydead_command))
     application.add_handler(CommandHandler("retryuncertain", retryuncertain_command))

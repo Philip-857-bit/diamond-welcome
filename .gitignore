@@ -24,3 +24,6 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# Command Code (auto-managed local state)
+.commandcode/

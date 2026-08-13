@@ -24,11 +24,15 @@ from bot.commands import (
     OWNER_COMMANDS,
     OPERATOR_COMMANDS,
     PUBLIC_COMMANDS,
+    _exempt_identifier,
     disallow_command,
+    exempt_command,
+    exemptlist_command,
     menu_callback,
     retrydead_command,
     retryuncertain_command,
     setalert_command,
+    unexempt_command,
     wizard_input,
 )
 
@@ -54,7 +58,10 @@ class CommandMenuTests(unittest.TestCase):
         self.assertIn("menu", [command.command for command in OPERATOR_COMMANDS])
         self.assertIn("allow", [command.command for command in OWNER_COMMANDS])
         self.assertIn("retrydead", [command.command for command in OWNER_COMMANDS])
+        self.assertIn("exempt", [command.command for command in OWNER_COMMANDS])
+        self.assertIn("exemptlist", [command.command for command in OWNER_COMMANDS])
         self.assertNotIn("allow", [command.command for command in OPERATOR_COMMANDS])
+        self.assertNotIn("exempt", [command.command for command in OPERATOR_COMMANDS])
         self.assertNotIn(
             "retrydead", [command.command for command in OPERATOR_COMMANDS]
         )
@@ -191,6 +198,94 @@ class ButtonWizardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(context.user_data, {})
         self.assertTrue(any("restricted" in reply.lower() for reply in replies))
+
+
+class ExemptionTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _update(args, database):
+        replies = []
+
+        class Registry:
+            async def register_user(self, user_id, *, owner=False):
+                return True
+
+        async def reply(text, **kwargs):
+            replies.append(text)
+
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(reply_text=reply),
+            effective_user=SimpleNamespace(id=123456789),
+            effective_chat=SimpleNamespace(type="private"),
+        )
+        context = SimpleNamespace(
+            args=args,
+            application=SimpleNamespace(
+                bot_data={
+                    "database": database,
+                    "watchlist": object(),
+                    "command_registry": Registry(),
+                }
+            ),
+        )
+        return update, context, replies
+
+    class ExemptDatabase:
+        def __init__(self):
+            self.exempt = []
+
+        async def add_exempt(self, identifier, added_by):
+            if identifier in self.exempt:
+                return False
+            self.exempt.append(identifier)
+            return True
+
+        async def remove_exempt(self, identifier):
+            if identifier in self.exempt:
+                self.exempt.remove(identifier)
+                return True
+            return False
+
+        async def list_exempt(self):
+            return list(self.exempt)
+
+    async def test_exempt_adds_and_lists_bot_id(self) -> None:
+        database = self.ExemptDatabase()
+        update, context, replies = self._update(["879589599062679552"], database)
+        await exempt_command(update, context)
+        self.assertTrue(any("exempted" in r for r in replies))
+
+        update, context, replies = self._update([], database)
+        await exemptlist_command(update, context)
+        self.assertTrue(any("879589599062679552" in r for r in replies))
+
+    async def test_exempt_accepts_username_and_name(self) -> None:
+        database = self.ExemptDatabase()
+        update, context, replies = self._update(["@RoseMusicBot"], database)
+        await exempt_command(update, context)
+        self.assertTrue(any("exempted" in r for r in replies))
+        self.assertEqual(database.exempt, ["@rosemusicbot"])
+
+        update, context, replies = self._update(["Rose Music Bot"], database)
+        await exempt_command(update, context)
+        self.assertTrue(any("exempted" in r for r in replies))
+        self.assertEqual(database.exempt, ["@rosemusicbot", "name:rose music bot"])
+
+    async def test_unexempt_removes_bot_id(self) -> None:
+        database = self.ExemptDatabase()
+        update, context, _ = self._update(["879589599062679552"], database)
+        await exempt_command(update, context)
+
+        update, context, replies = self._update(["879589599062679552"], database)
+        await unexempt_command(update, context)
+        self.assertTrue(any("removed" in r for r in replies))
+
+    def test_exempt_identifier_normalization(self) -> None:
+        self.assertEqual(_exempt_identifier("879589599062679552"), "879589599062679552")
+        self.assertEqual(_exempt_identifier("@RoseMusicBot"), "@rosemusicbot")
+        self.assertEqual(_exempt_identifier("Rose Music Bot"), "name:rose music bot")
+        self.assertIsNone(_exempt_identifier(""))
+        self.assertIsNone(_exempt_identifier("@"))
+        self.assertIsNone(_exempt_identifier(str(2**63)))
 
 
 class AlertDestinationTests(unittest.IsolatedAsyncioTestCase):

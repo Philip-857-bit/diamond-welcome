@@ -59,6 +59,16 @@ async def new_member_handler(
         if user_id == bot_id:
             continue
 
+        # F1.4: Skip admin-whitelisted users/bots (e.g. a music bot)
+        database = context.application.bot_data.get("database")
+        if database is not None and await database.is_exempt_member(
+            user_id, member.username, member.first_name
+        ):
+            logger.info(
+                "Skipping CAPTCHA for exempt member %s in chat %s", user_id, chat_id
+            )
+            continue
+
         first_name = member.first_name or "User"
 
         # F1.3: Immediately mute

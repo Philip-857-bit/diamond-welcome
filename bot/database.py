@@ -34,6 +34,12 @@ CREATE TABLE IF NOT EXISTS operators (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS exempt_users (
+    identifier TEXT PRIMARY KEY,
+    added_by BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS watched_tokens (
     mint TEXT PRIMARY KEY,
     name TEXT,
@@ -195,6 +201,41 @@ class Database:
             "SELECT user_id FROM operators ORDER BY user_id"
         )
         return [int(row["user_id"]) for row in rows]
+
+    async def is_exempt_member(
+        self, user_id: int, username: str | None, first_name: str | None
+    ) -> bool:
+        identifiers = [str(user_id)]
+        if username:
+            identifiers.append("@" + username.lower())
+        if first_name:
+            identifiers.append("name:" + first_name.strip().lower())
+        value = await self._pool().fetchval(
+            "SELECT EXISTS(SELECT 1 FROM exempt_users WHERE identifier = ANY($1::text[]))",
+            identifiers,
+        )
+        return bool(value)
+
+    async def add_exempt(self, identifier: str, added_by: int) -> bool:
+        result = await self._pool().execute(
+            "INSERT INTO exempt_users (identifier, added_by) VALUES ($1, $2) "
+            "ON CONFLICT (identifier) DO NOTHING",
+            identifier,
+            added_by,
+        )
+        return result.endswith("1")
+
+    async def remove_exempt(self, identifier: str) -> bool:
+        result = await self._pool().execute(
+            "DELETE FROM exempt_users WHERE identifier = $1", identifier
+        )
+        return result.endswith("1")
+
+    async def list_exempt(self) -> list[str]:
+        rows = await self._pool().fetch(
+            "SELECT identifier FROM exempt_users ORDER BY identifier"
+        )
+        return [str(row["identifier"]) for row in rows]
 
     async def add_token(self, token: WatchedToken) -> bool:
         result = await self._pool().execute(

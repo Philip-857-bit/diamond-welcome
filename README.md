@@ -110,6 +110,9 @@ The configured owner additionally sees:
 | `/allow <user_id>` | Add an operator |
 | `/disallow <user_id>` | Remove an operator |
 | `/users` | List owner and operators |
+| `/exempt <user_id \| @username \| display_name>` | Skip the CAPTCHA for a Telegram user/bot (e.g. a music bot) |
+| `/unexempt <user_id \| @username \| display_name>` | Re-enable the CAPTCHA for a user/bot |
+| `/exemptlist` | List CAPTCHA-exempt users/bots |
 | `/setalert <chat_id>` | Change the alert destination |
 | `/retrydead` | Replay alerts that exhausted delivery retries |
 | `/retryuncertain confirm` | Explicitly replay ambiguous Telegram sends |
